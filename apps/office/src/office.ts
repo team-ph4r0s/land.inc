@@ -3,7 +3,7 @@ import type { AgentState } from '@land/protocol';
 import { AgentSprite } from './agent';
 import { iso } from './iso';
 import { DESKS, DOOR, SPOTS, ZONE_OF, type Desk, type Tile } from './layout';
-import type { Scene } from './scene';
+import { drawBoard, type Scene } from './scene';
 
 const SCREEN = { off: 0x1b2330, think: 0x3b82f6, write: 0x22c55e, wait: 0xf59e0b };
 
@@ -21,12 +21,15 @@ export class Office {
   private world: Container;
   private scene: Scene;
   onSelect?: (id: string) => void;
+  onBoard?: () => void;
+  private running = -1;
 
   constructor(world: Container, scene: Scene) {
     this.world = world;
     this.scene = scene;
     this.links.zIndex = 99999;
     world.addChild(this.links);
+    scene.board.on('pointertap', () => this.onBoard?.());
   }
 
   upsert(state: AgentState): void {
@@ -67,6 +70,13 @@ export class Office {
       // People already at work when the office opens are at their places, not queueing at the door.
       if (fresh) this.agents.get(s.id)?.teleport();
     }
+  }
+
+  /** Sticky notes on the cork board follow the number of running tasks. */
+  setTasks(running: number): void {
+    if (running === this.running) return;
+    this.running = running;
+    drawBoard(this.scene.board, running);
   }
 
   select(id: string | undefined): void {

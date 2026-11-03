@@ -1,4 +1,4 @@
-import type { Activity, AgentState, LogEntry } from '@land/protocol';
+import { describeModel, type Activity, type AgentState, type LogEntry } from '@land/protocol';
 import { ICON, SOURCE_COLOR } from './agent';
 
 const LABEL: Record<Activity, string> = {
@@ -14,28 +14,56 @@ const ago = (t: number) => {
   return s < 60 ? `${s} с` : s < 3600 ? `${Math.round(s / 60)} мин` : `${Math.round(s / 3600)} ч`;
 };
 
-/** Agent roster grouped by project, plus the activity log of the selected agent. */
+export type Tab = 'office' | 'tasks';
+
+/** Sidebar with two tabs: the agent roster (with the selected agent's log) and the task board. */
 export class Sidebar {
   private pending = false;
   private online = false;
+  private count = 0;
+  private running = 0;
+  private tab: Tab = 'office';
+  private head: HTMLElement;
   private el: HTMLElement;
+  /** Host element for the task board panel. */
+  readonly tasksPane: HTMLElement;
   private onPick: (id: string) => void;
   private last?: [Map<string, AgentState>, Map<string, LogEntry[]>, string | undefined];
 
-  constructor(el: HTMLElement, onPick: (id: string) => void) {
-    this.el = el;
+  constructor(root: HTMLElement, onPick: (id: string) => void) {
+    root.innerHTML = '<div class="head"></div><div class="pane office"></div><div class="pane tasks" hidden></div>';
+    this.head = root.querySelector('.head')!;
+    this.el = root.querySelector('.pane.office')!;
+    this.tasksPane = root.querySelector('.pane.tasks')!;
     this.onPick = onPick;
-    el.addEventListener('click', (e) => {
+    this.el.addEventListener('click', (e) => {
       const row = (e.target as HTMLElement).closest<HTMLElement>('[data-id]');
       if (row) this.onPick(row.dataset.id!);
     });
+    this.head.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-tab]');
+      if (b) this.show(b.dataset.tab as Tab);
+    });
+    this.renderHead();
     setInterval(() => this.last && this.render(...this.last), 5000);
+  }
+
+  show(tab: Tab): void {
+    this.tab = tab;
+    this.el.hidden = tab !== 'office';
+    this.tasksPane.hidden = tab !== 'tasks';
+    this.renderHead();
+  }
+
+  setRunning(n: number): void {
+    this.running = n;
+    this.renderHead();
   }
 
   setOnline(online: boolean): void {
     this.online = online;
+    this.renderHead();
     if (this.last) this.render(...this.last);
-    else this.el.innerHTML = this.header(0);
   }
 
   scheduleRender(states: Map<string, AgentState>, logs: Map<string, LogEntry[]>, selected?: string): void {
@@ -55,7 +83,9 @@ export class Sidebar {
       const k = a.project || 'без проекта';
       byProject.set(k, [...(byProject.get(k) ?? []), a]);
     }
-    let html = this.header(states.size);
+    this.count = states.size;
+    this.renderHead();
+    let html = '';
     if (!states.size) {
       html += `<p class="empty">${this.online
         ? 'В офисе пусто. Запустите сессию в Claude Code или Codex — агент придёт через дверь.'
@@ -69,7 +99,7 @@ export class Sidebar {
           <div class="info">
             <div class="title">${esc(a.title)}</div>
             <div class="meta">${ICON[a.activity]} ${LABEL[a.activity]} · ${esc(a.detail)}</div>
-            <div class="meta dim">${SOURCE_NAME[a.source]}${a.model ? ' · ' + esc(a.model) : ''} · ${ago(a.updatedAt)} назад</div>
+            <div class="meta dim">${a.taskId ? '📌 ' : ''}${SOURCE_NAME[a.source]} · ${esc(describeModel(a.source, a.model).label)}${a.effort ? ' · ' + esc(a.effort) : ''} · ${ago(a.updatedAt)} назад</div>
           </div>
         </div>`;
       }
@@ -83,8 +113,13 @@ export class Sidebar {
     this.el.innerHTML = html;
   }
 
-  private header(count: number): string {
-    return `<header><h1>land<span>.inc</span></h1>
-      <div class="status ${this.online ? 'on' : 'off'}">${this.online ? `в офисе: ${count}` : 'нет связи'}</div></header>`;
+  private renderHead(): void {
+    const badge = this.running ? ` <b>${this.running}</b>` : '';
+    this.head.innerHTML = `<header><h1>land<span>.inc</span></h1>
+      <div class="status ${this.online ? 'on' : 'off'}">${this.online ? `в офисе: ${this.count}` : 'нет связи'}</div></header>
+      <nav class="tabs">
+        <button type="button" data-tab="office" class="${this.tab === 'office' ? 'on' : ''}">Офис</button>
+        <button type="button" data-tab="tasks" class="${this.tab === 'tasks' ? 'on' : ''}">📌 Задачи${badge}</button>
+      </nav>`;
   }
 }

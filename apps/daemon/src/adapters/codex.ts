@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { Store } from '../store.ts';
 import { JsonlTail } from '../tail.ts';
-import { clip, describeTool } from '../activity.ts';
+import { clip, describeTool, testOutcome } from '../activity.ts';
 
 const RECENT_MS = 45 * 60_000;
 const POLL_MS = 1_500;
@@ -191,12 +191,14 @@ export class CodexAdapter {
       case 'custom_tool_call': {
         let input: Rec = {};
         try {
-          input = typeof p.arguments === 'string' ? JSON.parse(p.arguments) : (p.input && typeof p.input === 'object' ? p.input : {});
+          if (typeof p.arguments === 'string') input = JSON.parse(p.arguments);
+          else if (typeof p.input === 'string') input = { code: p.input }; // code-mode `exec` and apply_patch send raw text
+          else if (p.input && typeof p.input === 'object') input = p.input;
         } catch {
-          // apply_patch sends a raw patch string as input
+          // not JSON: leave the input empty
         }
-        const { activity, detail } = describeTool(p.name ?? 'tool', input);
-        return this.store.tool(id, p.name ?? 'tool', activity, detail, at);
+        const { activity, detail, test } = describeTool(p.name ?? 'tool', input);
+        return this.store.tool(id, p.name ?? 'tool', activity, detail, at, test);
       }
       case 'local_shell_call': {
         const { activity, detail } = describeTool('local_shell', { command: p.action?.command });
@@ -206,7 +208,7 @@ export class CodexAdapter {
         return this.store.tool(id, 'web_search', 'web', `Гуглит «${clip(p.action?.query ?? '', 40)}»`, at);
       case 'function_call_output':
       case 'custom_tool_call_output':
-        return this.store.toolDone(id, at);
+        return this.store.toolDone(id, at, testOutcome(outputText(p.output)));
     }
   }
 }
@@ -217,8 +219,20 @@ function contextPatch(p: Rec): Parameters<Store['update']>[1] {
     patch.cwd = p.cwd;
     patch.project = basename(p.cwd);
   }
-  if (typeof p.model === 'string') patch.model = p.model;
+  // The model can change between turns, so every turn_context updates it.
+  if (typeof p.model === 'string') {
+    patch.model = p.model;
+    patch.role = p.model === 'codex-auto-review' ? 'reviewer' : 'worker';
+  }
+  if (typeof p.effort === 'string') patch.effort = p.effort;
   return patch;
+}
+
+/** Tool output is a string or a list of content parts, depending on the tool. */
+function outputText(output: unknown): string {
+  if (typeof output === 'string') return output;
+  if (Array.isArray(output)) return output.map((c: Rec) => (typeof c?.text === 'string' ? c.text : '')).join('\n');
+  return '';
 }
 
 /** Text of a message item, or '' for empty messages and injected context (AGENTS.md, environment). */

@@ -15,12 +15,26 @@ export interface DeskView {
 export interface Scene {
   desks: DeskView[];
   racks: Graphics[];
+  /** Cork board on the left wall: the task board. */
+  board: Graphics;
 }
 
 /** Static office: floor, walls and furniture. Each furniture tile is its own depth-sorted node. */
 export function buildScene(world: Container): Scene {
   world.addChild(floor());
   world.addChild(walls());
+  const board = new Graphics();
+  board.zIndex = -89000;
+  board.eventMode = 'static';
+  board.cursor = 'pointer';
+  drawBoard(board, 0);
+  const title = new Text({ text: 'ЗАДАЧИ', style: { fontFamily: 'Inter, system-ui, sans-serif', fontSize: 10, fontWeight: '800', fill: 0x5b3a1e, letterSpacing: 1.5 } });
+  const tp = iso(0, 9.7);
+  title.anchor.set(0.5);
+  title.position.set(tp.x, tp.y - 79);
+  title.skew.set(0, -0.46);
+  board.addChild(title);
+  world.addChild(board);
 
   const add = (t: Tile, draw: (g: Graphics) => void, lift = 0) => {
     const g = new Graphics();
@@ -51,7 +65,7 @@ export function buildScene(world: Container): Scene {
     return { desk: d, screen };
   });
 
-  return { desks, racks };
+  return { desks, racks, board };
 }
 
 function floor(): Graphics {
@@ -117,6 +131,21 @@ function walls(): Graphics {
   g.addChild(sign);
   g.zIndex = -90000;
   return g;
+}
+
+/** Cork board with one sticky note per running task (up to eight). */
+export function drawBoard(g: Graphics, running: number): void {
+  g.clear();
+  wallPanelY(g, 8.1, 11.3, 22, 72, 0x7a5a3e);
+  wallPanelY(g, 8.25, 11.15, 25, 69, 0xc89f72);
+  const colors = [0xfde047, 0xf9a8d4, 0x86efac, 0x93c5fd];
+  for (let i = 0; i < Math.min(running, 8); i++) {
+    const y0 = 8.45 + (i % 4) * 0.68;
+    const h0 = i < 4 ? 46 : 30;
+    wallPanelY(g, y0, y0 + 0.5, h0, h0 + 14, colors[i % colors.length]);
+    wallPanelY(g, y0 + 0.22, y0 + 0.28, h0 + 12, h0 + 14.5, 0xef4444); // pin
+  }
+  if (!running) wallPanelY(g, 9.3, 10.1, 38, 52, 0xfdfdfb, 0.7);
 }
 
 function deskBody(g: Graphics, d: Tile): void {

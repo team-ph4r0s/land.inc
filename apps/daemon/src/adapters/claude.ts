@@ -126,6 +126,7 @@ export class ClaudeAdapter {
       patch.project = basename(rec.cwd);
     }
     if (rec.message?.model && !String(rec.message.model).startsWith('<')) patch.model = rec.message.model;
+    if (typeof rec.effort === 'string') patch.effort = rec.effort;
     if (!this.store.has(id)) {
       patch.startedAt = at;
       if (id === t.id && t.title) patch.title = t.title;
@@ -137,7 +138,7 @@ export class ClaudeAdapter {
 
     if (rec.type === 'user') {
       for (const b of blocks) {
-        if (b.type === 'tool_result') this.store.toolDone(id, at);
+        if (b.type === 'tool_result') this.store.toolDone(id, at, b.is_error !== true);
         else if (b.type === 'text' && !rec.isMeta && isHumanText(b.text)) {
           if (b.text.startsWith('[Request interrupted')) {
             this.store.turnEnd(id, at);
@@ -159,8 +160,8 @@ export class ClaudeAdapter {
 
     for (const b of blocks) {
       if (b.type === 'tool_use') {
-        const { activity, detail } = describeTool(b.name, b.input);
-        this.store.tool(id, b.name, activity, detail, at);
+        const { activity, detail, test } = describeTool(b.name, b.input);
+        this.store.tool(id, b.name, activity, detail, at, test);
       } else if (b.type === 'text' && b.text?.trim()) {
         this.store.log(id, { at, kind: 'assistant', text: b.text });
       } else if (b.type === 'thinking') {

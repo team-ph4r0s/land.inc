@@ -1,5 +1,6 @@
 import { Container, Graphics, Text } from 'pixi.js';
-import type { Activity, AgentState } from '@land/protocol';
+import { describeModel, type Activity, type AgentState } from '@land/protocol';
+import { drawCharacter, KIND_SCALE, type Look } from './character';
 import { depth, iso } from './iso';
 import { findPath, type Tile } from './layout';
 
@@ -18,7 +19,10 @@ function hash(s: string): number {
   return h >>> 0;
 }
 
-/** One agent in the office: a little person that walks tile to tile and animates its activity. */
+/** Mood from a test run shows for this long after the run finished. */
+const MOOD_MS = 90_000;
+
+/** One agent in the office: a little dude that walks tile to tile and acts out its activity. */
 export class AgentSprite {
   readonly view = new Container();
   state: AgentState;
@@ -36,7 +40,11 @@ export class AgentSprite {
   private body = new Graphics();
   private ring = new Graphics();
   private name: Text;
+  private modelText: Text;
   private namePlate = new Graphics();
+  private top = -54;
+  /** When the current activity started (performance.now). */
+  private since = performance.now();
   private bubble = new Container();
   private bubbleBg = new Graphics();
   private bubbleText: Text;
@@ -56,13 +64,15 @@ export class AgentSprite {
 
     this.name = new Text({ text: '', style: { fontFamily: 'Inter, system-ui, sans-serif', fontSize: 11, fontWeight: '600', fill: 0xffffff } });
     this.name.anchor.set(0.5, 1);
+    this.modelText = new Text({ text: '', style: { fontFamily: 'Inter, system-ui, sans-serif', fontSize: 9, fontWeight: '600', fill: 0xffc56b } });
+    this.modelText.anchor.set(0.5, 1);
     this.bubbleText = new Text({
       text: '',
       style: { fontFamily: 'Inter, system-ui, sans-serif', fontSize: 11, fill: 0x1f2430, wordWrap: true, wordWrapWidth: 170 },
     });
     this.bubbleText.anchor.set(0.5, 1);
     this.bubble.addChild(this.bubbleBg, this.bubbleText);
-    this.view.addChild(this.ring, this.body, this.namePlate, this.name, this.bubble);
+    this.view.addChild(this.ring, this.body, this.namePlate, this.name, this.modelText, this.bubble);
     this.view.eventMode = 'static';
     this.view.cursor = 'pointer';
     this.view.on('pointerover', () => this.setHover(true));
@@ -72,6 +82,7 @@ export class AgentSprite {
 
   apply(state: AgentState): void {
     const changed = state.activity !== this.state.activity || state.detail !== this.state.detail;
+    if (state.activity !== this.state.activity) this.since = performance.now();
     this.state = state;
     this.relabel();
     if (changed && state.detail) this.say(state.detail);
@@ -92,11 +103,14 @@ export class AgentSprite {
     const state = this.state;
     const compact = state.activity === 'idle' && !this.hover && !this.selected;
     const title = state.title.length > 26 ? state.title.slice(0, 25) + '…' : state.title;
-    this.name.text = compact ? ICON.idle : `${ICON[state.activity]} ${title}`;
+    const pin = state.taskId ? '📌 ' : '';
+    this.name.text = compact ? ICON.idle : `${ICON[state.activity]} ${pin}${title}`;
+    const model = describeModel(state.source, state.model).label;
+    this.modelText.text = compact ? '' : state.effort ? `${model} · ${state.effort}` : model;
+    const w = Math.max(this.name.width, this.modelText.width);
+    const h = this.name.height + (this.modelText.text ? this.modelText.height : 0);
     this.namePlate.clear();
-    this.namePlate
-      .roundRect(-this.name.width / 2 - 6, -this.name.height - 2, this.name.width + 12, this.name.height + 4, 6)
-      .fill({ color: 0x1f2430, alpha: 0.78 });
+    this.namePlate.roundRect(-w / 2 - 6, -h - 2, w + 12, h + 4, 6).fill({ color: 0x1f2430, alpha: 0.8 });
   }
 
   say(text: string, ms = 6000): void {
@@ -162,59 +176,31 @@ export class AgentSprite {
 
     const bubbleOn = performance.now() < this.bubbleUntil || this.state.activity === 'wait' || this.selected;
     this.bubble.visible = bubbleOn;
-    const top = this.small ? -42 : this.seated ? -46 : -54;
-    this.name.position.set(0, top);
+    const top = this.top - 4;
+    const modelH = this.modelText.text ? this.modelText.height : 0;
+    this.modelText.position.set(0, top);
+    this.name.position.set(0, top - modelH);
     this.namePlate.position.set(0, top);
-    this.bubble.position.set(0, top - 18);
+    this.bubble.position.set(0, top - modelH - this.name.height - 6);
   }
 
   private draw(): void {
     const g = this.body;
-    const sc = this.small ? 0.78 : 1;
-    const a = this.state.activity;
-    const walking = this.walking;
-    const seated = this.seated;
-    const bob = walking ? Math.abs(Math.sin(this.t * 10)) * 2 : 0;
-    const legSwing = walking ? Math.sin(this.t * 10) * 3 : 0;
-    const sit = seated ? 6 : 0;
-    const shirt = SOURCE_COLOR[this.state.source];
-
+    const info = describeModel(this.state.source, this.state.model);
+    const look: Look = { kind: info.kind, shirt: SOURCE_COLOR[this.state.source], skin: this.skin, hair: this.hair };
+    const sc = (this.small ? 0.78 : 1) * (KIND_SCALE[info.kind] ?? 1);
+    const mood = this.state.mood && Date.now() - (this.state.moodAt ?? 0) < MOOD_MS ? this.state.mood : undefined;
     g.clear();
     g.scale.set(sc);
-    g.ellipse(0, 0, 11, 5).fill({ color: 0x000000, alpha: 0.18 });
-
-    // Legs
-    if (!seated) {
-      g.roundRect(-5 + legSwing * 0.3, -12, 4, 12, 2).fill(0x2f3542);
-      g.roundRect(1 - legSwing * 0.3, -12, 4, 12, 2).fill(0x2f3542);
-    } else {
-      g.roundRect(-6, -9, 12, 5, 2).fill(0x2f3542);
-    }
-    const y0 = -12 + sit - bob;
-    // Body
-    g.roundRect(-8, y0 - 17, 16, 18, 6).fill(shirt);
-    // Arms
-    const typing = seated && a === 'write' ? Math.sin(this.t * 24) * 1.5 : 0;
-    if (a === 'wait' && seated) {
-      g.roundRect(6, y0 - 34, 4, 18, 2).fill(shirt); // raised hand
-      g.circle(8, y0 - 36, 3).fill(this.skin);
-    } else {
-      g.roundRect(-11, y0 - 15 + typing, 4, 12, 2).fill(shirt);
-      g.roundRect(7, y0 - 15 - typing, 4, 12, 2).fill(shirt);
-    }
-    if (a === 'idle' && !walking) {
-      g.roundRect(8, y0 - 8, 5, 6, 1).fill(0xffffff); // coffee
-      g.rect(9, y0 - 7, 3, 1.5).fill(0x6f4e37);
-    }
-    // Head
-    g.circle(0, y0 - 24, 8).fill(this.skin);
-    g.ellipse(0, y0 - 29, 8.5, 5).fill(this.hair);
-    if (a === 'wait') {
-      const pulse = 1 + Math.sin(this.t * 6) * 0.12;
-      g.circle(0, y0 - 46, 7 * pulse).fill(0xf59e0b);
-      g.roundRect(-1.2, y0 - 50, 2.4, 6, 1).fill(0xffffff);
-      g.circle(0, y0 - 42, 1.3).fill(0xffffff);
-    }
+    const top = drawCharacter(g, look, {
+      t: this.t,
+      activity: this.state.activity,
+      walking: this.walking,
+      seated: this.seated,
+      mood,
+      busyFor: (performance.now() - this.since) / 1000,
+    });
+    this.top = top * sc;
 
     this.ring.clear();
     if (this.selected) this.ring.ellipse(0, 0, 16, 8).stroke({ width: 2, color: 0xffc56b });

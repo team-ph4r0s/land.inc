@@ -6,6 +6,7 @@ import { connect } from './net';
 import { iso } from './iso';
 import { W, H } from './layout';
 import { Sidebar } from './ui';
+import { TaskBoardPanel } from './board';
 import './style.css';
 
 const stage = document.getElementById('stage')!;
@@ -29,6 +30,17 @@ let selected: string | undefined;
 
 const sidebar = new Sidebar(document.getElementById('sidebar')!, (id) => select(id));
 office.onSelect = (id) => select(id);
+office.onBoard = () => sidebar.show('tasks');
+let send: ReturnType<typeof connect> = () => false;
+const board = new TaskBoardPanel(sidebar.tasksPane, (m) => send(m), (id) => {
+  sidebar.show('office');
+  if (selected !== id) select(id);
+});
+const syncBoard = () => {
+  board.setAgents(new Set(states.keys()));
+  sidebar.setRunning(board.running);
+  office.setTasks(board.running);
+};
 
 function select(id: string | undefined): void {
   selected = selected === id ? undefined : id;
@@ -38,9 +50,20 @@ function select(id: string | undefined): void {
   if (a) focus(a.pos.x, a.pos.y);
 }
 
-connect(
+send = connect(
   (m) => {
     switch (m.type) {
+      case 'board':
+        board.setBoard(m.config, m.tasks);
+        syncBoard();
+        return;
+      case 'task':
+        board.upsert(m.task);
+        syncBoard();
+        return;
+      case 'error':
+        board.showError(m.message);
+        return;
       case 'snapshot':
         states.clear();
         logs.clear();
@@ -67,6 +90,7 @@ connect(
       }
     }
     sidebar.scheduleRender(states, logs, selected);
+    if (m.type !== 'log') syncBoard();
   },
   (online) => sidebar.setOnline(online),
 );

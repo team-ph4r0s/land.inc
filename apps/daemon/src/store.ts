@@ -19,7 +19,7 @@ export const BUSY_LEAVE_AFTER_MS = 4 * 60 * 60_000;
 interface Internal {
   state: AgentState;
   log: LogEntry[];
-  pendingTool?: { name: string; at: number };
+  pendingTool?: { name: string; at: number; test?: boolean };
   /** Set when the transcript says the turn ended (or a hook said so). */
   turnEnded: boolean;
   /** Activity forced by a hook, e.g. a permission prompt; cleared by the next record. */
@@ -93,20 +93,25 @@ export class Store extends EventEmitter<{ message: [ServerMessage] }> {
     this.publish(a);
   }
 
-  /** Agent started a tool call. */
-  tool(id: string, name: string, activity: Activity, detail: string, at: number): void {
+  /** Agent started a tool call. `test` marks a test run, whose outcome sets the mood. */
+  tool(id: string, name: string, activity: Activity, detail: string, at: number, test = false): void {
     const a = this.agents.get(id);
     if (!a) return;
-    a.pendingTool = { name, at };
+    a.pendingTool = { name, at, test };
     a.turnEnded = false;
     a.hookWait = undefined;
     this.setActivity(a, activity, detail, at);
     this.log(id, { at, kind: 'tool', text: detail });
   }
 
-  toolDone(id: string, at: number): void {
+  /** The pending tool returned; `ok` is its success when the transcript tells. */
+  toolDone(id: string, at: number, ok?: boolean): void {
     const a = this.agents.get(id);
     if (!a) return;
+    if (a.pendingTool?.test && ok !== undefined) {
+      a.state.mood = ok ? 'cool' : 'fail';
+      a.state.moodAt = at;
+    }
     a.pendingTool = undefined;
     a.hookWait = undefined;
     if (a.state.activity === 'wait') this.setActivity(a, 'think', 'Обдумывает результат', at);

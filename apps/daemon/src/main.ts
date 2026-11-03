@@ -1,12 +1,13 @@
 import { createServer, type IncomingMessage } from 'node:http';
 import { basename } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { DAEMON_PORT, type ServerMessage } from '@land/protocol';
+import { DAEMON_PORT, type ClientMessage, type ServerMessage } from '@land/protocol';
 import { Store } from './store.ts';
 import { ClaudeAdapter } from './adapters/claude.ts';
 import { CodexAdapter } from './adapters/codex.ts';
 import { startDemo } from './demo.ts';
 import { describeTool, needsUser } from './activity.ts';
+import { TaskBoard } from './tasks.ts';
 
 const args = process.argv.slice(2);
 const port = Number(process.env.LAND_PORT ?? DAEMON_PORT);
@@ -17,6 +18,7 @@ if (!args.includes('--no-real')) {
   new ClaudeAdapter(store).start();
   new CodexAdapter(store).start();
 }
+const board = new TaskBoard(store);
 
 /**
  * Transcripts are private. The daemon only listens on loopback, but any web page
@@ -74,8 +76,8 @@ function onClaudeHook(h: Record<string, any>): void {
       store.newTurn(id, 'Читает задачу', now);
       break;
     case 'PreToolUse': {
-      const { activity, detail } = describeTool(h.tool_name ?? 'tool', h.tool_input ?? {});
-      store.tool(id, h.tool_name ?? 'tool', activity, detail, now);
+      const { activity, detail, test } = describeTool(h.tool_name ?? 'tool', h.tool_input ?? {});
+      store.tool(id, h.tool_name ?? 'tool', activity, detail, now, test);
       break;
     }
     case 'PostToolUse':
@@ -87,19 +89,41 @@ function onClaudeHook(h: Record<string, any>): void {
   }
 }
 
-const wss = new WebSocketServer({ server, verifyClient: ({ origin, req }: { origin: string; req: IncomingMessage }) =>
+const wss = new WebSocketServer({ server, maxPayload: 64 * 1024, verifyClient: ({ origin, req }: { origin: string; req: IncomingMessage }) =>
   req.headers.host === `127.0.0.1:${port}` && !!origin && allowedOrigin(origin) });
 const clients = new Set<WebSocket>();
-wss.on('connection', (ws) => {
-  clients.add(ws);
-  ws.send(JSON.stringify(store.snapshot()));
-  ws.on('close', () => clients.delete(ws));
-});
-store.on('message', (msg: ServerMessage) => {
+const send = (ws: WebSocket, msg: ServerMessage) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(msg));
+const broadcast = (msg: ServerMessage) => {
   if (!clients.size) return;
   const data = JSON.stringify(msg);
   for (const ws of clients) if (ws.readyState === ws.OPEN) ws.send(data);
+};
+
+wss.on('connection', (ws) => {
+  clients.add(ws);
+  send(ws, store.snapshot());
+  send(ws, { type: 'board', config: board.config(), tasks: board.list() });
+  ws.on('message', (raw) => {
+    // Only the office client (an allowed origin, see verifyClient) can start tasks.
+    let msg: ClientMessage;
+    try {
+      msg = JSON.parse(String(raw));
+    } catch {
+      return send(ws, { type: 'error', message: 'Некорректное сообщение' });
+    }
+    try {
+      if (msg.type === 'task.create') {
+        board.create(msg.task);
+        broadcast({ type: 'board', config: board.config(), tasks: board.list() });
+      } else if (msg.type === 'task.cancel') board.cancel(msg.id);
+    } catch (e) {
+      send(ws, { type: 'error', message: (e as Error).message });
+    }
+  });
+  ws.on('close', () => clients.delete(ws));
 });
+store.on('message', broadcast);
+board.on('task', (task) => broadcast({ type: 'task', task }));
 
 server.listen(port, '127.0.0.1', () => {
   console.log(`[land] демон запущен: ws://127.0.0.1:${port}`);
