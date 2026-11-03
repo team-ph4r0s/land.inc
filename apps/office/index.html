@@ -11,11 +11,17 @@
         <div class="brand"><span class="brand-mark">✳</span><strong>land<span>.inc</span></strong><small>ОФИС АГЕНТОВ</small></div>
         <div class="app-bar-title"><span class="bar-icon">▦</span><div><strong>Офис</strong><small>Рабочее пространство команды</small></div></div>
         <div class="bar-caption">МЕСТО ДЛЯ ХОРОШЕЙ РАБОТЫ <span>✳</span></div>
+        <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Переключить тему">☾</button>
       </header>
       <div class="workspace">
         <main class="office-area">
-          <div class="office-heading"><div><span class="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</span><h2>Ваш офис</h2><p>Здесь ваши агенты работают вместе</p></div><div class="view-hint">Перетащите для перемещения · колесо для масштаба</div></div>
-          <div class="scene-frame"><div id="stage"></div><div class="scene-caption"><span class="live-dot"></span> ЖИЗНЬ ОФИСА <span class="caption-separator">/</span> В РЕАЛЬНОМ ВРЕМЕНИ</div></div>
+          <div class="office-heading"><div><span class="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</span><h2>Ваш офис</h2><p>Здесь ваши агенты работают вместе</p></div><div class="view-hint">Перетащите для перемещения · колесо или кнопки для масштаба</div></div>
+          <div class="scene-frame"><div id="stage"></div><div class="scene-caption"><span class="live-dot"></span> ЖИЗНЬ ОФИСА <span class="caption-separator">/</span> В РЕАЛЬНОМ ВРЕМЕНИ</div>
+            <div class="scene-controls" role="group" aria-label="Масштаб офиса">
+              <button type="button" data-zoom="in" aria-label="Приблизить" title="Приблизить">+</button>
+              <button type="button" data-zoom="out" aria-label="Отдалить" title="Отдалить">−</button>
+              <button type="button" data-zoom="fit" aria-label="Показать весь офис" title="Показать весь офис">⤢</button>
+            </div></div>
           <div class="office-footer"><span>✳</span><div><strong>Всё на своих местах</strong><small>Наблюдайте за работой команды в реальном времени</small></div><span class="footer-end">land.inc &nbsp; / &nbsp; ВАШ ОФИС</span></div>
         </main>
         <aside id="sidebar"></aside>

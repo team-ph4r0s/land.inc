@@ -35,12 +35,16 @@ export function drawCharacter(g: Graphics, look: Look, pose: Pose): number {
   const bob = walking ? Math.abs(Math.sin(t * 10)) * 2 : a === 'idle' ? Math.sin(t * 2) * 0.6 : 0;
   const swing = walking ? Math.sin(t * 10) * 3 : 0;
   const sit = seated ? 5 : 0;
-  const bodyBottom = -7 + sit - bob;
+  // Antigravity floats: no feet on the floor, a slow hover instead of steps.
+  const floating = look.kind === 'antigravity';
+  const lift = floating ? (seated ? 3 : 8) + Math.sin(t * 2.4) * 1.8 : 0;
+  const bodyBottom = -7 + sit - (floating ? lift : bob);
   const bodyTop = bodyBottom - 13;
   const hy = bodyTop - 9; // head centre
   const R = 12;
 
-  g.ellipse(0, 0, 12, 5).fill({ color: 0x000000, alpha: 0.18 });
+  if (floating) g.ellipse(0, 0, 9 - lift * 0.3, 3.5 - lift * 0.1).fill({ color: 0x000000, alpha: 0.12 });
+  else g.ellipse(0, 0, 12, 5).fill({ color: 0x000000, alpha: 0.18 });
 
   // Cape goes behind everything else.
   if (look.kind === 'opus') {
@@ -48,7 +52,12 @@ export function drawCharacter(g: Graphics, look: Look, pose: Pose): number {
   }
 
   // Legs
-  if (!seated) {
+  if (floating) {
+    // A soft glow where feet would be.
+    g.ellipse(0, bodyBottom + 4, 6, 2.5).fill({ color: 0x8ab4f8, alpha: 0.35 + Math.sin(t * 6) * 0.15 });
+    g.roundRect(-5, bodyBottom - 1, 4, 5, 2).fill(0x2f3542);
+    g.roundRect(1, bodyBottom - 1, 4, 5, 2).fill(0x2f3542);
+  } else if (!seated) {
     g.roundRect(-5 + swing * 0.3, -9, 4, 9, 2).fill(0x2f3542);
     g.roundRect(1 - swing * 0.3, -9, 4, 9, 2).fill(0x2f3542);
   } else {
@@ -253,6 +262,14 @@ function headwear(g: Graphics, look: Look, hy: number, R: number, t: number): vo
       g.roundRect(-9, top, 18, 4, 2).fill(0x1f2937);
       g.rect(-2, top + 0.5, 4, 3).fill(0xfacc15);
       break;
+    case 'antigravity': {
+      g.ellipse(0, hy - 2, R + 5, 4.5).stroke({ width: 1.2, color: 0x8ab4f8, alpha: 0.9 });
+      const a = t * 1.6;
+      const px = Math.cos(a) * (R + 5);
+      const py = hy - 2 + Math.sin(a) * 4.5;
+      g.circle(px, py, 2).fill(0xfbbc04);
+      break;
+    }
     case 'codex': // visor
       g.roundRect(-R + 1, hy - 6, R * 2 - 2, 3, 1.5).fill(0x0f766e);
       break;

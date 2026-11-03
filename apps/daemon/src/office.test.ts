@@ -264,3 +264,8 @@ test('after a crash between the copy and the file, the newer copy wins', () => {
   writeFileSync(`${file}.tmp`, '[["7",{'); // cut off while being written
   assert.equal(readRecoverable(file), '[]');
 });
+
+test('Antigravity gets its own character and never a guessed model name', () => {
+  assert.deepEqual(describeModel('antigravity'), { kind: 'antigravity', label: 'Antigravity' });
+  assert.deepEqual(describeModel('antigravity', 'gemini-x'), { kind: 'antigravity', label: 'gemini-x' });
+});

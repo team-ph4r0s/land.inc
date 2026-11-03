@@ -159,7 +159,7 @@ export const DAEMON_PORT = 4317;
 
 export interface ModelInfo {
   /** Character the office draws for this model. */
-  kind: 'opus' | 'sonnet' | 'haiku' | 'fable' | 'claude' | 'sol' | 'terra' | 'luna' | 'astra' | 'reviewer' | 'codex' | 'demo';
+  kind: 'opus' | 'sonnet' | 'haiku' | 'fable' | 'claude' | 'sol' | 'terra' | 'luna' | 'astra' | 'reviewer' | 'codex' | 'antigravity' | 'demo';
   /** Human name, e.g. "Sonnet 5.5" or "GPT-6.1 Terra". */
   label: string;
 }
@@ -184,7 +184,8 @@ export function describeModel(source: Source, model?: string): ModelInfo {
     const name = tier ? ` ${tier[0].toUpperCase()}${tier.slice(1)}` : '';
     return { kind: tier ?? 'codex', label: `GPT-${gpt[1]}${name}` };
   }
-  if (source === 'antigravity') return { kind: 'codex', label: model || 'Antigravity' };
+  // Antigravity does not reliably name its model in the transcript; never guess one.
+  if (source === 'antigravity') return { kind: 'antigravity', label: model || 'Antigravity' };
   if (source === 'claude') return { kind: 'claude', label: model || 'Claude' };
   return { kind: 'codex', label: model || 'Codex' };
 }

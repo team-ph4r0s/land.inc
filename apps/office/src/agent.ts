@@ -19,6 +19,9 @@ function hash(s: string): number {
   return h >>> 0;
 }
 
+/** icon: just the activity icon; name: icon and title; full: and the model with its effort. */
+export type Detail = 'icon' | 'name' | 'full';
+
 /** Mood from a test run shows for this long after the run finished. */
 const MOOD_MS = 90_000;
 
@@ -35,6 +38,12 @@ export class AgentSprite {
   gone = false;
   selected = false;
   private hover = false;
+  /** How much the name plate says at the current zoom; see Office.setZoom. */
+  private detail: Detail = 'full';
+  /** Another plate is in the way: shrink to the icon unless this agent is the one in focus. */
+  private crowded = false;
+  /** Size of the plate when shown in full, kept so overlap checks need not re-render it. */
+  private fullBox = { x: 0, y: 0, width: 0, height: 0 };
 
   private path: Tile[] = [];
   private body = new Graphics();
@@ -100,18 +109,43 @@ export class AgentSprite {
   }
 
   /** Agents on a break show just an icon so the kitchen does not drown in name plates. */
+  setDetail(detail: Detail): void {
+    if (detail === this.detail) return;
+    this.detail = detail;
+    this.relabel();
+  }
+
+  setCrowded(on: boolean): void {
+    if (on === this.crowded) return;
+    this.crowded = on;
+    this.relabel();
+  }
+
+  /** In focus: selected or under the pointer. Such a plate is always shown in full. */
+  get focused(): boolean {
+    return this.selected || this.hover;
+  }
+
+  /** Where the plate would be, shown in full, in world coordinates: for overlap checks. */
+  plateRect(): { x: number; y: number; w: number; h: number } {
+    const b = this.fullBox;
+    return { x: this.view.x + b.x, y: this.view.y + this.namePlate.y + b.y, w: b.width, h: b.height };
+  }
+
   private relabel(): void {
     const state = this.state;
-    const compact = state.activity === 'idle' && !this.hover && !this.selected;
+    const compact = !this.focused && (state.activity === 'idle' || this.detail === 'icon' || this.crowded);
     const title = state.title.length > 26 ? state.title.slice(0, 25) + '…' : state.title;
     const pin = state.taskId ? '📌 ' : '';
-    this.name.text = compact ? ICON.idle : `${ICON[state.activity]} ${pin}${title}`;
+    // A compact plate still says what the agent is doing: a waiting hand must not look like a coffee break.
+    this.name.text = compact ? ICON[state.activity] : `${ICON[state.activity]} ${pin}${title}`;
     const model = describeModel(state.source, state.model).label;
-    this.modelText.text = compact ? '' : state.effort ? `${model} · ${state.effort}` : model;
+    this.modelText.text = compact || (this.detail === 'name' && !this.focused) ? '' : state.effort ? `${model} · ${state.effort}` : model;
     const w = Math.max(this.name.width, this.modelText.width);
     const h = this.name.height + (this.modelText.text ? this.modelText.height : 0);
     this.namePlate.clear();
     this.namePlate.roundRect(-w / 2 - 6, -h - 2, w + 12, h + 4, 6).fill({ color: 0x1f2430, alpha: 0.8 });
+    if (!this.crowded || this.focused) this.fullBox = { x: -w / 2 - 6, y: -h - 2, width: w + 12, height: h + 4 };
   }
 
   say(text: string, ms = 6000): void {

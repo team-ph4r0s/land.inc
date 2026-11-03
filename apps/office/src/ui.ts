@@ -44,6 +44,14 @@ export class Sidebar {
       const row = (e.target as HTMLElement).closest<HTMLElement>('[data-id]');
       if (row) this.onPick(row.dataset.id!);
     });
+    // Rows are buttons for the keyboard too.
+    this.el.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const row = (e.target as HTMLElement).closest<HTMLElement>('[data-id]');
+      if (!row) return;
+      e.preventDefault();
+      this.onPick(row.dataset.id!);
+    });
     this.head.addEventListener('click', (e) => {
       const b = (e.target as HTMLElement).closest<HTMLElement>('[data-tab]');
       if (b) this.show(b.dataset.tab as Tab);
@@ -105,7 +113,7 @@ export class Sidebar {
     for (const [project, list] of [...byProject].sort()) {
       html += `<h3>${esc(project)}</h3>`;
       for (const a of list.sort((p, q) => Number(!!p.parentId) - Number(!!q.parentId) || q.updatedAt - p.updatedAt)) {
-        html += `<div class="agent ${a.id === selected ? 'sel' : ''} ${a.parentId ? 'sub' : ''} ${a.activity}" data-id="${esc(a.id)}">
+        html += `<div class="agent ${a.id === selected ? 'sel' : ''} ${a.parentId ? 'sub' : ''} ${a.activity}" data-id="${esc(a.id)}" role="button" tabindex="0" aria-pressed="${a.id === selected}">
           <span class="dot" style="background:${hex(SOURCE_COLOR[a.source])}"></span>
           <div class="info">
             <div class="title">${esc(a.title)}</div>
@@ -121,7 +129,10 @@ export class Sidebar {
         .map((e) => `<div class="entry ${e.kind}"><span>${new Date(e.at).toLocaleTimeString()}</span>${esc(e.text)}</div>`)
         .join('') || '<p class="empty">Пока пусто</p>'}</div>`;
     }
+    // The roster re-renders every few seconds; keep keyboard focus on the same agent.
+    const focused = this.el.contains(document.activeElement) ? (document.activeElement as HTMLElement).closest<HTMLElement>('[data-id]')?.dataset.id : undefined;
     this.el.innerHTML = html;
+    if (focused) [...this.el.querySelectorAll<HTMLElement>('[data-id]')].find((r) => r.dataset.id === focused)?.focus();
   }
 
   private renderHead(): void {

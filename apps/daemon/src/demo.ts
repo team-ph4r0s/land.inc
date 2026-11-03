@@ -1,4 +1,4 @@
-import type { Activity } from '@land/protocol';
+import type { Activity, AgentState } from '@land/protocol';
 import type { Store } from './store.ts';
 
 const CAST = [
@@ -10,7 +10,9 @@ const CAST = [
   { id: 'demo:6', title: 'Сказка для онбординга', project: 'website', model: 'claude-fable-5-1' },
   { id: 'demo:7', title: 'Ночной прогон', project: 'billing', model: 'gpt-6-luna', effort: 'low' },
   { id: 'demo:8', title: 'Поиск по логам', project: 'api-server', model: 'gpt-6-astra' },
-].map((c) => ({ ...c, source: 'demo' as const }));
+].map((c) => ({ ...c, source: 'demo' as AgentState['source'] }));
+// Antigravity keeps its own source: its character is chosen by source, not by model.
+CAST.push({ id: 'demo:9', title: 'Прототип без гравитации', project: 'website', model: '', source: 'antigravity' });
 
 const STEPS: [Activity, string][] = [
   ['think', 'Размышляет'],

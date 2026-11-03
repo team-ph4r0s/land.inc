@@ -1,6 +1,6 @@
 import { Container, Graphics } from 'pixi.js';
 import type { AgentState, Collaboration } from '@land/protocol';
-import { AgentSprite } from './agent';
+import { AgentSprite, type Detail } from './agent';
 import { iso } from './iso';
 import { DESKS, DOOR, HOME, SPOTS, ZONE_OF, type Desk, type Tile } from './layout';
 import { drawBoard, type Scene } from './scene';
@@ -55,6 +55,7 @@ export class Office {
       // Subagents appear next to the parent, everyone else comes in through the door.
       const spawn = parent ? { ...parent.pos } : { x: DOOR.x + 0.5, y: DOOR.y + 0.5 };
       a = new AgentSprite(state, spawn);
+      a.setDetail(this.detail);
       a.view.on('pointertap', () => this.onSelect?.(state.id));
       this.agents.set(state.id, a);
       this.world.addChild(a.view);
@@ -84,6 +85,33 @@ export class Office {
       this.upsert(s);
       // People already at work when the office opens are at their places, not queueing at the door.
       if (fresh) this.agents.get(s.id)?.teleport();
+    }
+  }
+
+  private detail: Detail = 'full';
+  private nextLayout = 0;
+
+  /** Far away plates show only icons, closer the title, close up the model too. */
+  setZoom(zoom: number): void {
+    this.detail = zoom < 0.6 ? 'icon' : zoom < 1.05 ? 'name' : 'full';
+    for (const a of this.agents.values()) a.setDetail(this.detail);
+  }
+
+  /**
+   * Plates that would cover each other: the agent nearer the viewer keeps its plate,
+   * the one behind shrinks to its icon. The agent in focus always wins.
+   */
+  private layoutPlates(): void {
+    const placed: { x: number; y: number; w: number; h: number }[] = [];
+    const hits = (r: (typeof placed)[number]) => placed.some((p) => r.x < p.x + p.w && p.x < r.x + r.w && r.y < p.y + p.h && p.y < r.y + r.h);
+    const order = [...this.agents.values()]
+      .filter((a) => !a.leaving)
+      .sort((p, q) => Number(q.focused) - Number(p.focused) || q.view.zIndex - p.view.zIndex);
+    for (const a of order) {
+      const r = a.plateRect();
+      const crowded = !a.focused && hits(r);
+      a.setCrowded(crowded);
+      if (!crowded) placed.push(r);
     }
   }
 
@@ -138,6 +166,11 @@ export class Office {
     }
     this.wander();
     this.paint();
+    // Plates move with their agents; re-check overlaps a few times a second, not every frame.
+    if (now >= this.nextLayout) {
+      this.nextLayout = now + 250;
+      this.layoutPlates();
+    }
   }
 
   private drop(a: AgentSprite): void {

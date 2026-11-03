@@ -11,15 +11,61 @@ import { MeetingPanel } from './meeting';
 import './style.css';
 
 const stage = document.getElementById('stage')!;
+
+// Theme: the system setting, unless the user pinned light or dark with the button (remembered per browser).
+type Theme = 'light' | 'dark';
+const THEME_KEY = 'land-theme';
+const systemDark = window.matchMedia('(prefers-color-scheme: dark)');
+function savedTheme(): Theme | undefined {
+  try {
+    const v = localStorage.getItem(THEME_KEY);
+    return v === 'light' || v === 'dark' ? v : undefined;
+  } catch {
+    return undefined; // storage can be unavailable (private mode, blocked site data)
+  }
+}
+/** A pinned theme lives on <html data-theme>; without one the system setting applies. */
+const currentTheme = (): Theme => (document.documentElement.dataset.theme as Theme | undefined) ?? (systemDark.matches ? 'dark' : 'light');
+function sceneColor(): string {
+  return getComputedStyle(document.documentElement).getPropertyValue('--scene').trim() || '#e5e3da';
+}
+function applyTheme(pin?: Theme): void {
+  const pinned = pin ?? savedTheme();
+  if (pinned) document.documentElement.dataset.theme = pinned;
+  else delete document.documentElement.dataset.theme;
+  const dark = currentTheme() === 'dark';
+  const button = document.getElementById('theme-toggle');
+  if (button) {
+    button.textContent = dark ? '☀' : '☾';
+    button.setAttribute('aria-label', dark ? 'Светлая тема' : 'Тёмная тема');
+  }
+}
+applyTheme();
 const app = new Application();
 await app.init({
   resizeTo: stage,
-  background: 0xe5e3da,
+  background: sceneColor(),
   antialias: true,
   resolution: Math.min(window.devicePixelRatio, 2),
   autoDensity: true,
 });
 stage.appendChild(app.canvas);
+const repaintScene = () => (app.renderer.background.color = sceneColor());
+document.getElementById('theme-toggle')?.addEventListener('click', () => {
+  const next: Theme = currentTheme() === 'dark' ? 'light' : 'dark';
+  try {
+    localStorage.setItem(THEME_KEY, next);
+  } catch {
+    // not remembered for next time, but switched now
+  }
+  applyTheme(next);
+  repaintScene();
+});
+systemDark.addEventListener('change', () => {
+  if (document.documentElement.dataset.theme) return; // the user pinned a theme
+  applyTheme();
+  repaintScene();
+});
 
 const world = new Container({ sortableChildren: true });
 app.stage.addChild(world);
@@ -122,8 +168,18 @@ send = connect(
 
 app.ticker.add((t) => office.update(Math.min(t.deltaMS / 1000, 0.1)));
 
-// Camera: drag to pan, wheel to zoom around the cursor, double-click to fit.
+// Camera: drag to pan, wheel or buttons to zoom, double-click or ⤢ to fit.
 let zoom = 1;
+const MIN_ZOOM = 0.35;
+const MAX_ZOOM = 3;
+/** Zoom to `next` keeping the point (mx, my) of the stage in place. */
+function zoomAt(next: number, mx: number, my: number): void {
+  next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, next));
+  world.position.set(mx - ((mx - world.x) * next) / zoom, my - ((my - world.y) * next) / zoom);
+  zoom = next;
+  world.scale.set(zoom);
+  office.setZoom(zoom);
+}
 function fit(): void {
   const w = stage.clientWidth;
   const h = stage.clientHeight;
@@ -133,6 +189,7 @@ function fit(): void {
   const bottom = iso(W, H + 5).y + 20;
   zoom = Math.min(w / (right - left + 60), h / (bottom - top + 40), 1.6);
   world.scale.set(zoom);
+  office.setZoom(zoom);
   world.position.set(w / 2 - ((left + right) / 2) * zoom, h / 2 - ((top + bottom) / 2) * zoom);
 }
 function focus(x: number, y: number): void {
@@ -154,12 +211,12 @@ app.canvas.addEventListener(
   (e) => {
     e.preventDefault();
     const r = app.canvas.getBoundingClientRect();
-    const mx = e.clientX - r.left;
-    const my = e.clientY - r.top;
-    const next = Math.min(3, Math.max(0.35, zoom * Math.exp(-e.deltaY * 0.0015)));
-    world.position.set(mx - ((mx - world.x) * next) / zoom, my - ((my - world.y) * next) / zoom);
-    zoom = next;
-    world.scale.set(zoom);
+    zoomAt(zoom * Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top);
   },
   { passive: false },
 );
+document.querySelector('.scene-controls')?.addEventListener('click', (e) => {
+  const action = (e.target as HTMLElement).closest<HTMLElement>('[data-zoom]')?.dataset.zoom;
+  if (action === 'fit') return fit();
+  if (action) zoomAt(zoom * (action === 'in' ? 1.25 : 0.8), stage.clientWidth / 2, stage.clientHeight / 2);
+});
