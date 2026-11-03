@@ -7,6 +7,7 @@ import { iso } from './iso';
 import { W, H } from './layout';
 import { Sidebar } from './ui';
 import { TaskBoardPanel } from './board';
+import { MeetingPanel } from './meeting';
 import './style.css';
 
 const stage = document.getElementById('stage')!;
@@ -36,8 +37,14 @@ const board = new TaskBoardPanel(sidebar.tasksPane, (m) => send(m), (id) => {
   sidebar.show('office');
   if (selected !== id) select(id);
 });
+const meeting = new MeetingPanel(sidebar.teamPane, (m) => send(m), (id) => {
+  sidebar.show('office');
+  if (selected !== id) select(id);
+});
 const syncBoard = () => {
   board.setAgents(new Set(states.keys()));
+  meeting.setAgents(new Set(states.keys()));
+  sidebar.setMeeting(meeting.running);
   sidebar.setRunning(board.running);
   office.setTasks(board.running);
 };
@@ -55,6 +62,17 @@ send = connect(
     switch (m.type) {
       case 'board':
         board.setBoard(m.config, m.tasks);
+        meeting.setModels(Object.values(m.config.executors).flatMap((e) => e.models));
+        syncBoard();
+        return;
+      case 'collabs':
+        meeting.setAll(m.collabs);
+        office.setCollabs(m.collabs);
+        syncBoard();
+        return;
+      case 'collab':
+        meeting.upsert(m.collab);
+        office.collab(m.collab);
         syncBoard();
         return;
       case 'task':

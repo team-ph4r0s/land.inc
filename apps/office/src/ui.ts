@@ -14,27 +14,31 @@ const ago = (t: number) => {
   return s < 60 ? `${s} с` : s < 3600 ? `${Math.round(s / 60)} мин` : `${Math.round(s / 3600)} ч`;
 };
 
-export type Tab = 'office' | 'tasks';
+export type Tab = 'office' | 'tasks' | 'team';
 
-/** Sidebar with two tabs: the agent roster (with the selected agent's log) and the task board. */
+/** Sidebar with three tabs: the agent roster (with the selected agent's log), the task board and «Переговорка». */
 export class Sidebar {
   private pending = false;
   private online = false;
   private count = 0;
   private running = 0;
+  private meeting = 0;
   private tab: Tab = 'office';
   private head: HTMLElement;
   private el: HTMLElement;
   /** Host element for the task board panel. */
   readonly tasksPane: HTMLElement;
+  /** Host element for «Переговорка». */
+  readonly teamPane: HTMLElement;
   private onPick: (id: string) => void;
   private last?: [Map<string, AgentState>, Map<string, LogEntry[]>, string | undefined];
 
   constructor(root: HTMLElement, onPick: (id: string) => void) {
-    root.innerHTML = '<div class="head"></div><div class="pane office"></div><div class="pane tasks" hidden></div>';
+    root.innerHTML = '<div class="head"></div><div class="pane office"></div><div class="pane tasks" hidden></div><div class="pane team" hidden></div>';
     this.head = root.querySelector('.head')!;
     this.el = root.querySelector('.pane.office')!;
     this.tasksPane = root.querySelector('.pane.tasks')!;
+    this.teamPane = root.querySelector('.pane.team')!;
     this.onPick = onPick;
     this.el.addEventListener('click', (e) => {
       const row = (e.target as HTMLElement).closest<HTMLElement>('[data-id]');
@@ -52,6 +56,13 @@ export class Sidebar {
     this.tab = tab;
     this.el.hidden = tab !== 'office';
     this.tasksPane.hidden = tab !== 'tasks';
+    this.teamPane.hidden = tab !== 'team';
+    this.renderHead();
+  }
+
+  setMeeting(n: number): void {
+    if (n === this.meeting) return;
+    this.meeting = n;
     this.renderHead();
   }
 
@@ -120,6 +131,7 @@ export class Sidebar {
       <nav class="tabs">
         <button type="button" data-tab="office" class="${this.tab === 'office' ? 'on' : ''}">Сотрудники</button>
         <button type="button" data-tab="tasks" class="${this.tab === 'tasks' ? 'on' : ''}">Задачи${badge}</button>
+        <button type="button" data-tab="team" class="${this.tab === 'team' ? 'on' : ''}">Переговорка${this.meeting ? ` <b>${this.meeting}</b>` : ''}</button>
       </nav>`;
   }
 }

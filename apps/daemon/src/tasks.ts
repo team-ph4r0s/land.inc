@@ -139,8 +139,12 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
     const p = this.procs.get(id);
     const task = this.tasks.find((t) => t.id === id);
     if (!task || !p) return;
-    // Cancelling again retries the kill, in case the first attempt did not take.
+    // Cancelling again retries a kill that failed; while an attempt is still running, more clicks do nothing.
+    const previous = this.cancels.get(id);
+    if (previous && !previous.kill) return;
     task.status = 'cancelling';
+    // The old failure is not true of the new attempt; keeping it would show the retry as failed already.
+    if (previous?.kill?.error) task.result = undefined;
     const attempt: { closed: boolean; last?: string; kill?: { error?: string } } = { closed: false };
     this.cancels.set(id, attempt);
     // The CLI starts its own children (shells, tools); stop the whole tree or report that we could not.

@@ -19,7 +19,9 @@ const configs = args.flatMap((a, i) => (args[i - 1] === '-c' ? [a] : []));
 let prompt = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => (prompt += d));
-process.stdin.on('end', () => {
+// FAKE_DELAY_MS makes the answer take a while, so a UI can show the run in progress.
+process.stdin.on('end', () => setTimeout(answer, Number(process.env.FAKE_DELAY_MS ?? 0)));
+function answer() {
   emit({ type: 'thread.started', thread_id: randomUUID() });
   if (prompt.includes('[child]')) spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
   if (prompt.includes('[sleep]')) return setTimeout(() => {}, 60_000);
@@ -41,4 +43,4 @@ PROMPT_CHARS ${prompt.length}
   emit({ type: 'item.completed', item: { type: 'agent_message', text: answer } });
   // The last line has no newline on purpose: the parser must still read it.
   process.stdout.write(JSON.stringify({ type: 'turn.completed', usage: {} }));
-});
+}

@@ -100,6 +100,41 @@ export interface NewTask {
   access: Access;
 }
 
+/** author does the task, reviewers check it read-only, the finisher (the author again) wraps up. */
+export type TurnRole = 'author' | 'reviewer' | 'finisher';
+export type TurnStatus = 'waiting' | 'running' | 'done' | 'failed' | 'cancelled' | 'skipped';
+
+export interface CollabTurn {
+  role: TurnRole;
+  executor: Executor;
+  model: string;
+  effort?: string;
+  access: Access;
+  status: TurnStatus;
+  /** Board task of this turn, once it started. */
+  taskId?: string;
+  /** Office agent of this turn, once its CLI reported one. */
+  agentId?: string;
+  /** What this turn passed on to the next one (its "## Коллеге" section). */
+  handoff?: string;
+}
+
+/** A task worked on by several agents in turns: one card in «Переговорка». */
+export interface Collaboration {
+  id: string;
+  prompt: string;
+  cwd: string;
+  access: Access;
+  status: 'running' | 'stopping' | 'done' | 'failed' | 'stopped';
+  turns: CollabTurn[];
+  createdAt: number;
+  finishedAt?: number;
+  /** The finisher's answer to the user. */
+  result?: string;
+  /** Why the work did not finish. */
+  reason?: string;
+}
+
 export type ServerMessage =
   | { type: 'snapshot'; agents: AgentState[]; logs: Record<string, LogEntry[]> }
   | { type: 'upsert'; agent: AgentState }
@@ -109,12 +144,16 @@ export type ServerMessage =
   | { type: 'task'; task: Task }
   | { type: 'task.accepted'; requestId: string }
   | { type: 'task.rejected'; requestId: string; message: string }
+  | { type: 'collabs'; collabs: Collaboration[] }
+  | { type: 'collab'; collab: Collaboration }
   | { type: 'error'; message: string };
 
 export type ClientMessage =
   | { type: 'task.create'; task: NewTask; requestId?: string }
   | { type: 'team.create'; task: NewTask; requestId?: string; colleague?: { model: string; effort?: string } }
-  | { type: 'task.cancel'; id: string };
+  | { type: 'task.cancel'; id: string }
+  /** Stop a collaboration: the running turn is cancelled and no further turn starts. */
+  | { type: 'team.cancel'; id: string };
 
 export const DAEMON_PORT = 4317;
 

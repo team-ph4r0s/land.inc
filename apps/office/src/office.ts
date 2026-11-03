@@ -1,5 +1,5 @@
 import { Container, Graphics } from 'pixi.js';
-import type { AgentState } from '@land/protocol';
+import type { AgentState, Collaboration } from '@land/protocol';
 import { AgentSprite } from './agent';
 import { iso } from './iso';
 import { DESKS, DOOR, HOME, SPOTS, ZONE_OF, type Desk, type Tile } from './layout';
@@ -87,6 +87,31 @@ export class Office {
     }
   }
 
+  /** Collaborations by id, for the lines between the agents of consecutive turns. */
+  private collabs = new Map<string, Collaboration>();
+  /** Agents that just handed their turn over meet in the meeting room until this time. */
+  private meetings = new Map<string, number>();
+
+  setCollabs(list: Collaboration[]): void {
+    this.collabs = new Map(list.map((c) => [c.id, c]));
+  }
+
+  /** A collaboration changed: whoever just handed a turn over walks to the meeting room and says what. */
+  collab(c: Collaboration): void {
+    const before = this.collabs.get(c.id);
+    this.collabs.set(c.id, c);
+    c.turns.forEach((turn, i) => {
+      const was = before?.turns[i];
+      const next = c.turns[i + 1];
+      if (turn.status !== 'done' || was?.status === 'done' || !turn.handoff || !next || next.status !== 'running') return;
+      const a = turn.agentId ? this.agents.get(turn.agentId) : undefined;
+      if (!a || a.leaving) return;
+      this.meetings.set(a.state.id, performance.now() + MEETING_MS);
+      a.say(`Передаю коллеге: ${turn.handoff.length > 90 ? turn.handoff.slice(0, 89) + '…' : turn.handoff}`, MEETING_MS);
+      this.route(a, true);
+    });
+  }
+
   /** Sticky notes on the cork board follow the number of running tasks. */
   setTasks(running: number): void {
     if (running === this.running) return;
@@ -100,6 +125,13 @@ export class Office {
 
   update(dt: number): void {
     this.t += dt;
+    const now = performance.now();
+    for (const [id, until] of this.meetings) {
+      if (now < until) continue;
+      this.meetings.delete(id);
+      const a = this.agents.get(id);
+      if (a) this.route(a, true); // back to what it is actually doing
+    }
     for (const a of [...this.agents.values()]) {
       a.update(dt);
       if (a.gone) this.drop(a);
@@ -147,7 +179,7 @@ export class Office {
   /** Send the agent to where its current activity happens. */
   private route(a: AgentSprite, force = false): void {
     if (a.leaving) return;
-    const zone = ZONE_OF[a.state.activity];
+    const zone = this.meetings.has(a.state.id) ? 'meeting' : ZONE_OF[a.state.activity];
     // Already there (e.g. Read → Grep): stay put instead of hopping between spots.
     if (zone === a.zone && a.target && !force) return;
     a.zone = zone;
@@ -220,5 +252,19 @@ export class Office {
       }
       g.fill({ color: 0xffc56b, alpha: 0.7 });
     }
+    // A line between the agents of consecutive turns while their team works.
+    for (const c of this.collabs.values()) {
+      if (c.status !== 'running' && c.status !== 'stopping') continue;
+      for (let i = 0; i + 1 < c.turns.length; i++) {
+        const a = c.turns[i].agentId && this.agents.get(c.turns[i].agentId!);
+        const b = c.turns[i + 1].agentId && this.agents.get(c.turns[i + 1].agentId!);
+        if (!a || !b || a === b || a.leaving || b.leaving) continue;
+        const s = iso(a.pos.x, a.pos.y);
+        const e = iso(b.pos.x, b.pos.y);
+        g.moveTo(s.x, s.y - 24).lineTo(e.x, e.y - 24).stroke({ width: 2, color: 0x10a37f, alpha: 0.55 });
+      }
+    }
   }
 }
+
+const MEETING_MS = 20_000;

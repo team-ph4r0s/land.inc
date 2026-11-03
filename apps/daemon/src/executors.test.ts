@@ -126,4 +126,40 @@ test('a Claude + Codex team runs three real turns: the colleague reviews read-on
   assert.match(done[1].prompt, /<<<СООБЩЕНИЕ 1 от claude\nСообщение от claude \(acceptEdits\)\nСООБЩЕНИЕ 1>>>/);
   assert.match(done[2].prompt, /Сообщение от codex \(read-only\)/);
   assert.doesNotMatch(done[2].prompt, /ARGS/);
+  // The card in «Переговорка» saw it all: three finished turns, each with its office agent.
+  const [collab] = team.list();
+  assert.equal(collab.status, 'done');
+  assert.deepEqual(collab.turns.map((t) => `${t.role}:${t.status}`), ['author:done', 'reviewer:done', 'finisher:done']);
+  assert.ok(collab.turns.every((t) => t.agentId));
+  assert.match(collab.result!, /fake claude answer/);
+});
+
+test('retrying a failed team stop: the old warning goes away, extra clicks wait, the confirmed stop ends the team', { timeout: 20_000 }, async () => {
+  const board = newBoard() as any;
+  const events: import('@land/protocol').Collaboration[] = [];
+  const team = createTeamCoordinator(board, () => {}, () => {}, { file: null, onCollab: (c) => events.push(c) });
+  board.on('task', (t: Task) => team.continueTeam(t));
+  const kills: ((error?: string) => void)[] = [];
+  board.killTree = (_p: unknown, _sync: boolean, onResult: (error?: string) => void) => kills.push(onResult);
+  try {
+    const collab = team.startTeam({ prompt: '[sleep]', cwd, executor: 'claude', model: 'claude-haiku-5-5', access: 'read' }, [{ executor: 'codex', model: 'gpt-fake' }]);
+    const card = () => team.list().find((c) => c.id === collab.id)!;
+    await new Promise<void>((r) => board.on('task', (t: Task) => t.status === 'running' && r()));
+    team.cancelTeam(collab.id);
+    kills[0]('Access is denied'); // the first kill fails
+    assert.match(card().reason!, /Не удалось остановить/);
+    team.cancelTeam(collab.id); // "Остановить ещё раз"
+    assert.equal(kills.length, 2);
+    assert.equal(card().reason, undefined); // the stale warning is gone while the retry runs
+    team.cancelTeam(collab.id); // a click while the retry is still running
+    assert.equal(kills.length, 2); // no overlapping attempt
+    const stopped = new Promise<void>((r) => board.on('task', (t: Task) => t.status === 'cancelled' && r()));
+    for (const p of board.procs.values()) p.kill();
+    kills[1](); // the retry succeeds
+    await stopped;
+    assert.equal(card().status, 'stopped');
+    assert.deepEqual(card().turns.map((t) => t.status), ['cancelled', 'skipped', 'skipped']);
+  } finally {
+    cleanup(board);
+  }
 });

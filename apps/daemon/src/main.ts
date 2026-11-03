@@ -10,6 +10,7 @@ import { startDemo } from './demo.ts';
 import { describeTool, needsUser } from './activity.ts';
 import { TaskBoard } from './tasks.ts';
 import { createTeamCoordinator } from './team.ts';
+import { fakeExecutors } from './fake-executors.ts';
 
 const args = process.argv.slice(2);
 const port = Number(process.env.LAND_PORT ?? DAEMON_PORT);
@@ -21,10 +22,18 @@ if (!args.includes('--no-real')) {
   new CodexAdapter(store).start();
   new AntigravityAdapter(store).start();
 }
-const board = new TaskBoard(store);
-const team = createTeamCoordinator(board, (message) => broadcast({ type: 'error', message }), (task, recipient) => {
-  if (task.agentId) store.log(task.agentId, { at: Date.now(), kind: 'system', text: `Передаёт ответ коллеге ${recipient}` });
-});
+// --fake-agents: tasks go to the fake CLIs from test/fakes and nothing is saved, for working on the UI without models.
+const fake = args.includes('--fake-agents');
+if (fake) process.env.FAKE_DELAY_MS ??= '6000';
+const board = new TaskBoard(store, fake ? { executors: fakeExecutors(), file: null } : {});
+const team = createTeamCoordinator(
+  board,
+  (message) => broadcast({ type: 'error', message }),
+  (task, recipient) => {
+    if (task.agentId) store.log(task.agentId, { at: Date.now(), kind: 'system', text: `Передаёт ответ коллеге ${recipient}` });
+  },
+  { onCollab: (collab) => broadcast({ type: 'collab', collab }), ...(fake ? { file: null } : {}) },
+);
 
 /**
  * Transcripts are private. The daemon only listens on loopback, but any web page
@@ -112,6 +121,7 @@ wss.on('connection', (ws) => {
   clients.add(ws);
   send(ws, store.snapshot());
   send(ws, { type: 'board', config: board.config(), tasks: board.list() });
+  send(ws, { type: 'collabs', collabs: team.list() });
   ws.on('message', (raw) => {
     // Only the office client (an allowed origin, see verifyClient) can start tasks.
     let msg: ClientMessage;
@@ -130,6 +140,7 @@ wss.on('connection', (ws) => {
         if (msg.requestId) send(ws, { type: 'task.accepted', requestId: msg.requestId });
         broadcast({ type: 'board', config: board.config(), tasks: board.list() });
       } else if (msg.type === 'task.cancel') board.cancel(msg.id);
+      else if (msg.type === 'team.cancel') team.cancelTeam(msg.id);
     } catch (e) {
       if ((msg.type === 'task.create' || msg.type === 'team.create') && msg.requestId)
         send(ws, { type: 'task.rejected', requestId: msg.requestId, message: (e as Error).message });
@@ -143,6 +154,16 @@ board.on('task', (task) => {
   broadcast({ type: 'task', task });
   team.continueTeam(task);
 });
+// Fake CLIs write no transcripts: put their workers in the office from the board instead.
+if (fake)
+  board.on('task', (task) => {
+    if (!task.agentId) return;
+    const at = Date.now();
+    const title = task.prompt.split('\n')[0].slice(0, 48);
+    store.update(task.agentId, { source: task.executor, title, cwd: task.cwd, project: basename(task.cwd), model: task.model, effort: task.effort, taskId: task.id }, at);
+    if (task.status === 'running') store.tool(task.agentId, 'Fake', task.access === 'write' ? 'write' : 'read', 'Работает над задачей', at);
+    else if (['done', 'failed', 'cancelled'].includes(task.status)) store.turnEnd(task.agentId, at);
+  });
 
 server.listen(port, '127.0.0.1', () => {
   console.log(`[land] демон запущен: ws://127.0.0.1:${port}`);

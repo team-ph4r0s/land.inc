@@ -173,3 +173,22 @@ code { background: #e8eae3; }
   #sidebar { width: 100%; height: auto; min-height: 300px; flex: 1; border: 1px solid #e0e2d9; }
   .footer-end { display: none; }
 }
+
+/* «Переговорка»: turns of a collaboration as a vertical stepper. */
+.turns { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.turn { position: relative; padding: 6px 8px 6px 22px; border: 1px solid var(--line); border-radius: 7px; font-size: 12px; }
+.turn + .turn::before { content: ''; position: absolute; left: 10px; top: -7px; height: 7px; border-left: 1px dashed var(--line); }
+.turn-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px; }
+.turn-dot { position: absolute; left: 7px; top: 11px; width: 7px; height: 7px; border-radius: 50%; background: var(--line); }
+.turn-state { margin-left: auto; color: var(--dim); font-size: 11px; }
+.turn.running { border-color: var(--accent); }
+.turn.running .turn-dot { background: var(--accent); animation: turn-pulse 1.2s ease-in-out infinite; }
+.turn.done .turn-dot { background: #7aa36c; }
+.turn.failed .turn-dot { background: #c0705f; }
+.turn.cancelled .turn-dot, .turn.skipped .turn-dot { background: transparent; border: 1px solid var(--dim); }
+.turn.waiting, .turn.skipped { color: var(--dim); }
+.turn details { margin-top: 4px; }
+.chip.cancelled { background: #ece9e1; color: #7a8179; }
+button.link { background: none; border: 0; padding: 0; margin-top: 3px; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; text-decoration: underline; }
+@keyframes turn-pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .turn.running .turn-dot { animation: none; } }

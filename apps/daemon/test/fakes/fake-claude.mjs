@@ -21,7 +21,9 @@ if (args[0] === 'auth' && args[1] === 'status') {
 let prompt = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => (prompt += d));
-process.stdin.on('end', () => {
+// FAKE_DELAY_MS makes the answer take a while, so a UI can show the run in progress.
+process.stdin.on('end', () => setTimeout(answer, Number(process.env.FAKE_DELAY_MS ?? 0)));
+function answer() {
   if (prompt.includes('[child]')) spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
   if (prompt.includes('[sleep]')) return setTimeout(() => {}, 60_000);
   if (prompt.includes('[signed-out]')) {
@@ -39,4 +41,4 @@ PROMPT_CHARS ${prompt.length}
 
 ## Коллеге
 Сообщение от claude (${flag('--permission-mode')})`);
-});
+}
