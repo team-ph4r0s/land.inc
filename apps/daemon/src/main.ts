@@ -68,6 +68,8 @@ function onClaudeHook(h: Record<string, any>): void {
   }
   switch (h.hook_event_name) {
     case 'Notification':
+      // Also fired after a minute of idling; that agent has finished and stays in the kitchen.
+      if (h.notification_type === 'idle_prompt' || /waiting for your input/i.test(h.message ?? '')) break;
       store.waiting(id, h.message ?? 'Ждёт вас', now);
       break;
     case 'UserPromptSubmit':
