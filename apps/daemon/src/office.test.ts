@@ -1,6 +1,5 @@
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-import { spawn } from 'node:child_process';
 import type { Task } from '@land/protocol';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -9,6 +8,7 @@ import { Store } from './store.ts';
 import { CodexAdapter } from './adapters/codex.ts';
 import { commandOutcome, describeTool, testOutcome } from './activity.ts';
 import { TaskBoard, overlaps, readRecoverable, writeAtomic } from './tasks.ts';
+import { fakeExecutors } from './fake-executors.ts';
 
 test('completed turns leave after five minutes, while active tools stay', () => {
   const store = new Store();
@@ -80,7 +80,7 @@ test('a green Codex test run puts on the shades, the model and effort follow eac
 });
 
 test('the task board refuses bad input before starting anything', () => {
-  const board = new TaskBoard(new Store());
+  const board = new TaskBoard(new Store(), { executors: fakeExecutors(), file: null });
   const base = { prompt: 'x', cwd: process.cwd(), executor: 'codex', model: 'gpt-6-luna', access: 'read' } as const;
   assert.throws(() => board.create({ ...base, prompt: '  ' }), /Опишите задачу/);
   assert.throws(() => board.create({ ...base, cwd: 'C:/definitely/missing/folder' }), /Папка проекта не найдена/);
@@ -103,7 +103,7 @@ test('only a summary of the whole run counts as green', () => {
 });
 
 test('a relative or empty project path is refused, not resolved against the daemon folder', () => {
-  const board = new TaskBoard(new Store());
+  const board = new TaskBoard(new Store(), { executors: fakeExecutors(), file: null });
   const base = { prompt: 'x', executor: 'codex', model: 'gpt-6-luna', access: 'read' } as const;
   assert.throws(() => board.create({ ...base, cwd: '' }), /полный путь/);
   assert.throws(() => board.create({ ...base, cwd: '.' }), /полный путь/);
@@ -112,9 +112,7 @@ test('a relative or empty project path is refused, not resolved against the daem
 
 /** A task whose "CLI" is a sleeping node process, so cancel paths run for real without an agent. */
 function sleepingTask(board: any) {
-  board.spawnCodex = () => spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: ['pipe', 'pipe', 'pipe'] });
-  board.save = () => {}; // keep the user's ~/.land/tasks.json out of tests
-  const task: Task = { id: 't1', prompt: 'x', cwd: process.cwd(), executor: 'codex', model: 'm', access: 'read', status: 'starting', createdAt: Date.now() };
+  const task: Task = { id: 't1', prompt: '[sleep]', cwd: process.cwd(), executor: 'codex', model: 'gpt-fake', access: 'read', status: 'starting', createdAt: Date.now() };
   board.tasks.unshift(task);
   board.run(task);
   return task;
@@ -137,7 +135,7 @@ const cleanup = (board: any) => {
 };
 
 test('a cancel whose tree kill fails is not reported as a clean cancel', { timeout: 10_000 }, async () => {
-  const board = new TaskBoard(new Store()) as any;
+  const board = new TaskBoard(new Store(), { executors: fakeExecutors(), file: null }) as any;
   try {
     board.killTree = (_p: unknown, _sync: boolean, onResult: (e?: string) => void) => onResult('Access is denied');
     const task = sleepingTask(board);
@@ -155,7 +153,7 @@ test('a cancel whose tree kill fails is not reported as a clean cancel', { timeo
 });
 
 test('a cancel waits for the tree kill even when the CLI closes first', { timeout: 10_000 }, async () => {
-  const board = new TaskBoard(new Store()) as any;
+  const board = new TaskBoard(new Store(), { executors: fakeExecutors(), file: null }) as any;
   try {
     let report: (e?: string) => void = () => {};
     board.killTree = (p: any, _sync: boolean, onResult: (e?: string) => void) => {
@@ -177,7 +175,7 @@ test('a cancel waits for the tree kill even when the CLI closes first', { timeou
 });
 
 test('a confirmed tree kill ends as cancelled', { timeout: 10_000 }, async () => {
-  const board = new TaskBoard(new Store()) as any;
+  const board = new TaskBoard(new Store(), { executors: fakeExecutors(), file: null }) as any;
   try {
     board.killTree = (p: any, _sync: boolean, onResult: (e?: string) => void) => {
       p.kill();
@@ -195,8 +193,8 @@ test('a confirmed tree kill ends as cancelled', { timeout: 10_000 }, async () =>
 });
 
 test('one writer per folder, readers are welcome', { timeout: 10_000 }, () => {
-  const board = new TaskBoard(new Store()) as any;
-  board.save = () => {};
+  const board = new TaskBoard(new Store(), { executors: fakeExecutors(), file: null }) as any;
+
   const cwd = process.cwd();
   board.tasks.unshift({ id: 'w', prompt: 'x', cwd, executor: 'codex', model: 'm', access: 'write', status: 'running', createdAt: Date.now() });
   board.config = () => ({ projects: [cwd], outsideGit: [], executors: { codex: { available: true, models: [{ id: 'm', label: 'M' }] }, claude: { available: false, models: [] } } });
