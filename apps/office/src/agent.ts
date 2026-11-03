@@ -2,12 +2,12 @@ import { Container, Graphics, Text } from 'pixi.js';
 import { describeModel, type Activity, type AgentState } from '@land/protocol';
 import { drawCharacter, KIND_SCALE, type Look } from './character';
 import { depth, iso } from './iso';
-import { findPath, type Tile } from './layout';
+import { DOOR, H, findPath, type Tile } from './layout';
 
 const SPEED = 2.6; // tiles per second
 const SKIN = [0xf1c27d, 0xe0ac69, 0xc68642, 0x8d5524, 0xffdbac];
 const HAIR = [0x2b1d14, 0x5a3825, 0xb5651d, 0x1c1c1c, 0xd4a017, 0x8e44ad, 0x7f8c8d];
-export const SOURCE_COLOR: Record<AgentState['source'], number> = { claude: 0xd97757, codex: 0x10a37f, demo: 0x7c6ff0 };
+export const SOURCE_COLOR: Record<AgentState['source'], number> = { claude: 0xd97757, codex: 0x10a37f, antigravity: 0x4285f4, demo: 0x7c6ff0 };
 
 export const ICON: Record<Activity, string> = {
   think: '💭', write: '⌨️', read: '📖', bash: '🖥️', web: '🌐', plan: '📋', talk: '💬', wait: '✋', idle: '☕',
@@ -84,6 +84,7 @@ export class AgentSprite {
     const changed = state.activity !== this.state.activity || state.detail !== this.state.detail;
     if (state.activity !== this.state.activity) this.since = performance.now();
     this.state = state;
+    this.small = !!state.parentId;
     this.relabel();
     if (changed && state.detail) this.say(state.detail);
   }
@@ -128,7 +129,8 @@ export class AgentSprite {
     if (this.target && this.target.x === tile.x && this.target.y === tile.y) return;
     this.target = tile;
     const from = { x: Math.round(this.pos.x - 0.5), y: Math.round(this.pos.y - 0.5) };
-    this.path = findPath(from, tile).map((p) => ({ x: p.x + 0.5, y: p.y + 0.5 }));
+    const route = tile.y >= H ? [...findPath(from, DOOR), { x: DOOR.x, y: H }, tile] : findPath(from, tile);
+    this.path = route.map((p) => ({ x: p.x + 0.5, y: p.y + 0.5 }));
   }
 
   /** Skip the walk and appear at the destination right away. */

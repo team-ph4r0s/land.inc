@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { Store } from '../store.ts';
 import { JsonlTail } from '../tail.ts';
-import { clip, describeTool, testOutcome } from '../activity.ts';
+import { clip, commandOutcome, describeTool, testOutcome } from '../activity.ts';
 
 const RECENT_MS = 45 * 60_000;
 const POLL_MS = 1_500;
@@ -208,7 +208,7 @@ export class CodexAdapter {
         return this.store.tool(id, 'web_search', 'web', `Гуглит «${clip(p.action?.query ?? '', 40)}»`, at);
       case 'function_call_output':
       case 'custom_tool_call_output':
-        return this.store.toolDone(id, at, testOutcome(outputText(p.output)));
+        return this.store.toolDone(id, at, commandOutcome(outputText(p.output)) ?? testOutcome(outputText(p.output)));
     }
   }
 }

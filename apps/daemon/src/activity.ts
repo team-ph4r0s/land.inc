@@ -30,7 +30,7 @@ export interface ToolInfo {
 /** Map a tool call (Claude or Codex naming) to an office activity and a short caption. */
 export function describeTool(name: string, input: Input = {}): ToolInfo {
   const info = describe(name, input);
-  const raw = input.command ?? input.cmd ?? input.code;
+  const raw = input.command ?? input.cmd ?? input.code ?? input.CommandLine;
   if (TEST_CMD.test(Array.isArray(raw) ? raw.join(' ') : str(raw))) info.test = true;
   return info;
 }
@@ -38,6 +38,18 @@ export function describeTool(name: string, input: Input = {}): ToolInfo {
 function describe(name: string, input: Input): ToolInfo {
   const n = name;
   switch (true) {
+    case /^(read_file|view_file)$/.test(n):
+      return { activity: 'read', detail: clip(str(input.toolSummary) || `Читает ${file(input.Path) || file(input.AbsolutePath) || 'файл'}`) };
+    case /^(write_file|edit_file|write_to_file|replace_file_content)$/.test(n):
+      return { activity: 'write', detail: clip(str(input.toolSummary) || `Правит ${file(input.Path) || file(input.TargetFile) || 'файл'}`) };
+    case n === 'run_command': {
+      const cmd = str(input.CommandLine);
+      return { activity: shellActivity(cmd), detail: clip(str(input.toolSummary) || cmd) };
+    }
+    case /^(search_web|read_url_content)$/.test(n):
+      return { activity: 'web', detail: clip(str(input.toolSummary) || str(input.query) || str(input.Url) || 'Ищет в интернете') };
+    case n === 'manage_task':
+      return { activity: 'plan', detail: clip(str(input.toolSummary) || 'Обновляет план') };
     case /^(Read|NotebookRead)$/.test(n):
       return { activity: 'read', detail: `Читает ${file(input.file_path) || 'файл'}` };
     case /^(Grep|Glob|LS|ToolSearch)$/.test(n):
@@ -68,13 +80,13 @@ function describe(name: string, input: Input): ToolInfo {
       return { activity: 'web', detail: `Открывает ${clip(str(input.url), 40)}` };
     case /browser|chrome|playwright|puppeteer/i.test(n):
       return { activity: 'web', detail: 'Работает в браузере' };
-    case /^(Agent|Task|spawn_agent)$/.test(n):
+    case /^(Agent|Task|spawn_agent|invoke_subagent)$/.test(n):
       return { activity: 'talk', detail: `Ставит задачу: ${clip(str(input.description) || str(input.message) || 'сабагенту', 40)}` };
-    case /^(SendMessage|send_input)$/.test(n):
+    case /^(SendMessage|send_input|send_message)$/.test(n):
       return { activity: 'talk', detail: 'Пишет коллеге' };
     case /(TodoWrite|update_plan|ExitPlanMode|EnterPlanMode|Task(Create|Update|List|Get))/.test(n):
       return { activity: 'plan', detail: 'Обновляет план' };
-    case /^(AskUserQuestion|request_user_input)$/.test(n):
+    case /^(AskUserQuestion|request_user_input|ask_question)$/.test(n):
       return { activity: 'wait', detail: 'Задаёт вам вопрос' };
     case n.startsWith('mcp__'):
       return { activity: 'write', detail: `Инструмент ${clip(n.split('__').pop() ?? n, 30)}` };
@@ -120,4 +132,10 @@ export function testOutcome(text: string): boolean | undefined {
   // A summary of the whole run: node --test, jest/vitest "Tests: N passed", pytest "N passed", cargo "test result: ok".
   if (/ℹ fail 0\b|\b0 fail(ed|ures?)?\b|Tests?:\s+\d+ passed|=+ \d+ passed|test result: ok\b|\b\d+ passing\b/i.test(text)) return true;
   return undefined;
+}
+
+/** Only explicit exit status counts; arbitrary text saying "error" is not enough. */
+export function commandOutcome(text: string): boolean | undefined {
+  const match = text.match(/(?:process\s+)?exit(?:ed with)?\s+code\s*:?\s*(-?\d+)/i);
+  return match ? Number(match[1]) === 0 : undefined;
 }

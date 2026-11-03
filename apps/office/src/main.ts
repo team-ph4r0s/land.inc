@@ -13,7 +13,7 @@ const stage = document.getElementById('stage')!;
 const app = new Application();
 await app.init({
   resizeTo: stage,
-  background: 0x1a1d26,
+  background: 0xe5e3da,
   antialias: true,
   resolution: Math.min(window.devicePixelRatio, 2),
   autoDensity: true,
@@ -64,6 +64,12 @@ send = connect(
       case 'error':
         board.showError(m.message);
         return;
+      case 'task.accepted':
+        board.submissionResult(m.requestId);
+        return;
+      case 'task.rejected':
+        board.submissionResult(m.requestId, m.message);
+        return;
       case 'snapshot':
         states.clear();
         logs.clear();
@@ -82,6 +88,7 @@ send = connect(
         if (selected === m.id) selected = undefined;
         break;
       case 'log': {
+        if (m.entry.kind === 'system' && m.entry.text.startsWith('Передаёт ответ коллеге')) office.agents.get(m.id)?.say(m.entry.text);
         const l = logs.get(m.id) ?? [];
         l.push(m.entry);
         if (l.length > 40) l.shift();
@@ -92,7 +99,7 @@ send = connect(
     sidebar.scheduleRender(states, logs, selected);
     if (m.type !== 'log') syncBoard();
   },
-  (online) => sidebar.setOnline(online),
+  (online) => { sidebar.setOnline(online); if (!online) board.disconnected(); },
 );
 
 app.ticker.add((t) => office.update(Math.min(t.deltaMS / 1000, 0.1)));
@@ -102,10 +109,10 @@ let zoom = 1;
 function fit(): void {
   const w = stage.clientWidth;
   const h = stage.clientHeight;
-  const left = iso(0, H).x;
+  const left = iso(0, H + 5).x;
   const right = iso(W, 0).x;
   const top = iso(0, 0).y - 110;
-  const bottom = iso(W, H).y + 20;
+  const bottom = iso(W, H + 5).y + 20;
   zoom = Math.min(w / (right - left + 60), h / (bottom - top + 40), 1.6);
   world.scale.set(zoom);
   world.position.set(w / 2 - ((left + right) / 2) * zoom, h / 2 - ((top + bottom) / 2) * zoom);

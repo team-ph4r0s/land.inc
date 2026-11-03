@@ -40,6 +40,7 @@ export class TaskBoardPanel {
   private list!: HTMLElement;
   private error!: HTMLElement;
   private known = new Set<string>();
+  private pending?: { id: string; prompt: string };
 
   constructor(el: HTMLElement, send: (m: ClientMessage) => boolean, onShowAgent: (id: string) => void) {
     this.el = el;
@@ -71,6 +72,19 @@ export class TaskBoardPanel {
   showError(message: string): void {
     this.error.textContent = message;
     this.error.hidden = false;
+  }
+
+  submissionResult(id: string, error?: string): void {
+    if (this.pending?.id !== id) return;
+    const prompt = this.field<HTMLTextAreaElement>('prompt');
+    if (!error && prompt.value.trim() === this.pending.prompt) prompt.value = '';
+    this.pending = undefined;
+    this.form.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled = false;
+    if (error) this.showError(error);
+  }
+
+  disconnected(): void {
+    if (this.pending) this.submissionResult(this.pending.id, 'Связь прервалась до подтверждения. Проверьте список задач перед повторной отправкой.');
   }
 
   get running(): number {
@@ -106,6 +120,12 @@ export class TaskBoardPanel {
         <label>Задача
           <textarea name="prompt" rows="5" placeholder="Что сделать? Например: найди, почему падает сборка, и предложи исправление"></textarea>
         </label>
+        <label class="team-choice"><input type="checkbox" name="team" /> Совместная работа Claude и Codex</label>
+        <div class="row" data-team-options hidden>
+          <label><span data-colleague-label>Модель коллеги</span> <select name="colleagueModel"></select></label>
+          <label>Рассуждения <select name="colleagueEffort"></select></label>
+        </div>
+        <p class="note">Три последовательных хода: первый агент выполняет задачу, коллега проверяет её только на чтение и пишет замечания, затем первый завершает работу. Право записи, если выбрано, есть только у первого агента.</p>
         <p class="error" hidden></p>
         <button type="submit" class="primary">Отправить команде</button>
       </form>
@@ -122,7 +142,7 @@ export class TaskBoardPanel {
         const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-value]');
         if (!b || b.disabled) return;
         this.setSeg(seg.dataset.name!, b.dataset.value!);
-        if (seg.dataset.name === 'executor') this.fillModels();
+        if (seg.dataset.name === 'executor') { this.fillModels(); this.fillColleagueModels(); }
         this.updateNotes();
       }),
     );
@@ -131,6 +151,10 @@ export class TaskBoardPanel {
       this.updateNotes();
     });
     this.field<HTMLSelectElement>('model').addEventListener('change', () => this.fillEfforts());
+    this.field<HTMLInputElement>('team').addEventListener('change', () => {
+      this.form.querySelector<HTMLElement>('[data-team-options]')!.hidden = !this.field<HTMLInputElement>('team').checked;
+    });
+    this.field<HTMLSelectElement>('colleagueModel').addEventListener('change', () => this.fillColleagueEfforts());
     this.form.addEventListener('submit', (e) => {
       e.preventDefault();
       this.submit();
@@ -178,6 +202,7 @@ export class TaskBoardPanel {
       if (other) this.setSeg('executor', other);
     }
     this.fillModels();
+    this.fillColleagueModels();
     this.updateNotes();
   }
 
@@ -201,6 +226,29 @@ export class TaskBoardPanel {
     const def = model?.defaultEffort ? ` (${model.defaultEffort})` : '';
     select.innerHTML = `<option value="">по умолчанию${esc(def)}</option>` + (model?.efforts ?? []).map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join('');
     // Board updates refill the lists; keep what the user picked if the model still offers it.
+    if (current && model?.efforts?.includes(current)) select.value = current;
+    select.disabled = !model?.efforts?.length;
+  }
+
+  private fillColleagueModels(): void {
+    const ex: Executor = this.seg('executor') === 'claude' ? 'codex' : 'claude';
+    this.form.querySelector<HTMLElement>('[data-colleague-label]')!.textContent = `Модель ${EXECUTOR[ex]}`;
+    const models = this.config?.executors[ex]?.models ?? [];
+    const select = this.field<HTMLSelectElement>('colleagueModel');
+    const current = select.value;
+    select.innerHTML = models.map((m) => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('');
+    if (models.some((m) => m.id === current)) select.value = current;
+    else if (ex === 'claude') select.value = models.find((m) => m.id.includes('sonnet'))?.id ?? models[0]?.id ?? '';
+    this.fillColleagueEfforts();
+  }
+
+  private fillColleagueEfforts(): void {
+    const ex: Executor = this.seg('executor') === 'claude' ? 'codex' : 'claude';
+    const model = this.config?.executors[ex]?.models.find((m) => m.id === this.field<HTMLSelectElement>('colleagueModel').value);
+    const select = this.field<HTMLSelectElement>('colleagueEffort');
+    const current = select.value;
+    const def = model?.defaultEffort ? ` (${model.defaultEffort})` : '';
+    select.innerHTML = `<option value="">по умолчанию${esc(def)}</option>` + (model?.efforts ?? []).map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join('');
     if (current && model?.efforts?.includes(current)) select.value = current;
     select.disabled = !model?.efforts?.length;
   }
@@ -234,8 +282,13 @@ export class TaskBoardPanel {
     const prompt = this.field<HTMLTextAreaElement>('prompt').value.trim();
     if (!cwd) return this.showError('Выберите папку проекта');
     if (!prompt) return this.showError('Опишите задачу');
+    if (this.pending) return;
+    const requestId = crypto.randomUUID();
+    const team = this.field<HTMLInputElement>('team').checked;
     const ok = this.send({
-      type: 'task.create',
+      type: team ? 'team.create' : 'task.create',
+      ...(team ? { colleague: { model: this.field<HTMLSelectElement>('colleagueModel').value, effort: this.field<HTMLSelectElement>('colleagueEffort').value || undefined } } : {}),
+      requestId,
       task: {
         prompt,
         cwd,
@@ -246,7 +299,8 @@ export class TaskBoardPanel {
       },
     });
     if (!ok) return this.showError('Нет связи с демоном');
-    this.field<HTMLTextAreaElement>('prompt').value = '';
+    this.pending = { id: requestId, prompt };
+    this.form.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled = true;
   }
 
   private renderList(): void {

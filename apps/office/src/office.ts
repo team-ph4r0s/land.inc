@@ -2,7 +2,7 @@ import { Container, Graphics } from 'pixi.js';
 import type { AgentState } from '@land/protocol';
 import { AgentSprite } from './agent';
 import { iso } from './iso';
-import { DESKS, DOOR, SPOTS, ZONE_OF, type Desk, type Tile } from './layout';
+import { DESKS, DOOR, HOME, SPOTS, ZONE_OF, type Desk, type Tile } from './layout';
 import { drawBoard, type Scene } from './scene';
 
 const SCREEN = { off: 0x1b2330, think: 0x3b82f6, write: 0x22c55e, wait: 0xf59e0b };
@@ -17,6 +17,8 @@ export class Office {
   private deskOwner = new Map<Desk, string>();
   private spotOwner = new Map<string, string>();
   private links = new Graphics();
+  private fires = new Map<Desk, Graphics>();
+  private extinguished = new Map<string, number>();
   private t = 0;
   private world: Container;
   private scene: Scene;
@@ -29,6 +31,19 @@ export class Office {
     this.scene = scene;
     this.links.zIndex = 99999;
     world.addChild(this.links);
+    for (const { desk } of scene.desks) {
+      const fire = new Graphics();
+      fire.zIndex = 90000;
+      fire.eventMode = 'static';
+      fire.cursor = 'pointer';
+      fire.on('pointertap', () => {
+        const id = this.deskOwner.get(desk);
+        const at = id && this.agents.get(id)?.state.fireAt;
+        if (id && at) this.extinguished.set(id, at);
+      });
+      this.fires.set(desk, fire);
+      world.addChild(fire);
+    }
     scene.board.on('pointertap', () => this.onBoard?.());
   }
 
@@ -56,7 +71,7 @@ export class Office {
     a.leaving = true;
     a.say('Ушёл домой 👋', 3000);
     this.release(a);
-    a.walkTo(DOOR);
+    a.walkTo(HOME);
   }
 
   /** Server snapshot: add/update everyone listed and let the rest leave. */
@@ -166,6 +181,16 @@ export class Office {
   private paint(): void {
     for (const { desk, screen } of this.scene.desks) {
       const a = this.agents.get(this.deskOwner.get(desk) ?? '');
+      const fire = this.fires.get(desk)!;
+      fire.clear();
+      const at = a?.state.fireAt;
+      if (a && at && Date.now() - at < 45_000 && this.extinguished.get(a.state.id) !== at) {
+        const p = iso(desk.x + 0.5, desk.y + 0.5);
+        const flicker = Math.sin(this.t * 12) * 3;
+        fire.ellipse(p.x, p.y - 30, 19, 9).fill({ color: 0xdb702f, alpha: 0.18 });
+        fire.poly([p.x - 12, p.y - 30, p.x - 8, p.y - 48, p.x - 2, p.y - 40, p.x + 3, p.y - 60 - flicker, p.x + 12, p.y - 37, p.x + 9, p.y - 28]).fill(0xd95532);
+        fire.poly([p.x - 7, p.y - 30, p.x - 3, p.y - 43 - flicker, p.x + 2, p.y - 36, p.x + 6, p.y - 47, p.x + 8, p.y - 30]).fill(0xf7b45a);
+      }
       let color = SCREEN.off;
       if (a && a.seated) {
         const act = a.state.activity;

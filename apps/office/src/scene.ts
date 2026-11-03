@@ -70,13 +70,17 @@ export function buildScene(world: Container): Scene {
 
 function floor(): Graphics {
   const g = new Graphics();
+  for (let y = H; y < H + 5; y++) {
+    for (let x = 0; x < W; x++) diamond(g, x, y, 1, 1, y < H + 2 ? 0xa9aaa6 : 0x555e69);
+  }
+  for (let x = 1; x < W; x += 4) diamond(g, x, H + 3.4, 2, 0.12, 0xe7dfc1);
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
-      let c = (x + y) % 2 ? 0xd9cdb8 : 0xd3c6af;
-      if (x >= 17 && y <= 5) c = (x + y) % 2 ? 0x8f9bad : 0x8794a7; // server room
-      else if (x >= 17 && y >= 7 && y <= 12) c = 0xb9c7d6; // meeting carpet
-      else if (x <= 6 && y >= 12) c = (x + y) % 2 ? 0xe6d3ad : 0xdfcca5; // kitchen
-      else if (y <= 1 && x <= 7) c = 0xc4b597; // archive
+      let c = (x + y) % 2 ? 0xded9cc : 0xd8d3c6;
+      if (x >= 17 && y <= 5) c = (x + y) % 2 ? 0xa6afa9 : 0x9da8a1; // server room
+      else if (x >= 17 && y >= 7 && y <= 12) c = 0xc3ccc0; // meeting carpet
+      else if (x <= 6 && y >= 12) c = (x + y) % 2 ? 0xe0d9c8 : 0xdad3c1; // kitchen
+      else if (y <= 1 && x <= 7) c = 0xcac5b5; // archive
       diamond(g, x, y, 1, 1, c);
     }
   }
@@ -104,8 +108,8 @@ function label(parent: Graphics, text: string, x: number, y: number): void {
 
 function walls(): Graphics {
   const g = new Graphics();
-  wallPanelX(g, 0, W, 0, WALL_H, 0xeee6da);
-  wallPanelY(g, 0, H, 0, WALL_H, 0xe1d7c8);
+  wallPanelX(g, 0, W, 0, WALL_H, 0xedeae1);
+  wallPanelY(g, 0, H, 0, WALL_H, 0xe4e1d7);
   wallPanelX(g, 0, W, WALL_H, WALL_H + 6, 0xfaf6f0);
   wallPanelY(g, 0, H, WALL_H, WALL_H + 6, 0xf3ede4);
   wallPanelX(g, 0, W, 0, 6, 0xb9a98f); // skirting
@@ -118,12 +122,12 @@ function walls(): Graphics {
   // Windows over the internet corner and the kitchen
   for (const [y0, y1] of [[3.6, 6.4], [12.6, 16.4]] as const) {
     wallPanelY(g, y0, y1, 30, 80, 0x8b9bb0);
-    wallPanelY(g, y0 + 0.1, y1 - 0.1, 33, 77, 0xbfe3f5);
+    wallPanelY(g, y0 + 0.1, y1 - 0.1, 33, 77, 0xcadad1);
     wallPanelY(g, (y0 + y1) / 2 - 0.04, (y0 + y1) / 2 + 0.04, 33, 77, 0x8b9bb0);
   }
   // Company sign
-  wallPanelX(g, 13.4, 16.2, 52, 76, 0x2b2f3a);
-  const sign = new Text({ text: 'land.inc', style: { fontFamily: 'Inter, system-ui, sans-serif', fontSize: 15, fontWeight: '800', fill: 0xffc56b } });
+  wallPanelX(g, 13.4, 16.2, 52, 76, 0x4c584c);
+  const sign = new Text({ text: 'land.inc', style: { fontFamily: 'Inter, system-ui, sans-serif', fontSize: 15, fontWeight: '800', fill: 0xe6e6d9 } });
   const s = iso(14.8, 0);
   sign.anchor.set(0.5);
   sign.position.set(s.x, s.y - 64);
@@ -178,7 +182,7 @@ function rack(g: Graphics, t: Tile): void {
 function glass(g: Graphics, t: Tile): void {
   const a = iso(t.x + 0.5, t.y);
   const b = iso(t.x + 0.5, t.y + 1);
-  g.poly([a.x, a.y, b.x, b.y, b.x, b.y - 70, a.x, a.y - 70]).fill({ color: 0xbfe3f5, alpha: 0.35 });
+  g.poly([a.x, a.y, b.x, b.y, b.x, b.y - 70, a.x, a.y - 70]).fill({ color: 0xcadad1, alpha: 0.35 });
   g.moveTo(a.x, a.y - 70).lineTo(b.x, b.y - 70).stroke({ width: 2, color: 0x8b9bb0 });
 }
 
@@ -193,14 +197,14 @@ function kiosk(g: Graphics, t: Tile): void {
 function counter(g: Graphics, t: Tile, coffee: boolean): void {
   box(g, t.x + 0.05, t.y + 0.02, 0.8, 0.96, 26, 0xf2efe9);
   if (coffee) {
-    box(g, t.x + 0.2, t.y + 0.3, 0.4, 0.4, 24, 0x2b2f3a, 26);
+    box(g, t.x + 0.2, t.y + 0.3, 0.4, 0.4, 24, 0x4c584c, 26);
     const s = iso(t.x + 0.6, t.y + 0.7);
     g.circle(s.x, s.y - 40, 2.5).fill(0xef4444);
   }
 }
 
 function sofa(g: Graphics, t: Tile): void {
-  const c = 0x5c7c9a;
+  const c = 0x818f7c;
   box(g, t.x, t.y + 0.15, 1, 0.8, 12, c);
   box(g, t.x, t.y + 0.7, 1, 0.25, 26, shade(c, 0.9));
 }
@@ -208,6 +212,6 @@ function sofa(g: Graphics, t: Tile): void {
 function plant(g: Graphics, t: Tile): void {
   box(g, t.x + 0.3, t.y + 0.3, 0.4, 0.4, 14, 0xb5651d);
   const s = iso(t.x + 0.5, t.y + 0.5);
-  for (const [dx, dy, r, c] of [[0, -30, 10, 0x2f7d4a], [-7, -24, 8, 0x3c9a5f], [7, -22, 8, 0x3c9a5f], [0, -38, 7, 0x4caf6e]] as const)
+  for (const [dx, dy, r, c] of [[0, -30, 10, 0x647c59], [-7, -24, 8, 0x78906b], [7, -22, 8, 0x78906b], [0, -38, 7, 0x91a582]] as const)
     g.circle(s.x + dx, s.y + dy, r).fill(c);
 }

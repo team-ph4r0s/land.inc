@@ -1,6 +1,6 @@
 // Shared contract between land-daemon and the office client.
 
-export type Source = 'claude' | 'codex' | 'demo';
+export type Source = 'claude' | 'codex' | 'antigravity' | 'demo';
 
 /** What the agent is doing right now; each activity maps to a zone of the office. */
 export type Activity =
@@ -36,6 +36,8 @@ export interface AgentState {
   role?: 'worker' | 'reviewer';
   mood?: Mood;
   moodAt?: number;
+  /** A confirmed command failure; clients may animate it for a short time. */
+  fireAt?: number;
   /** Set when the agent was launched from the task board. */
   taskId?: string;
   startedAt: number;
@@ -105,10 +107,13 @@ export type ServerMessage =
   | { type: 'log'; id: string; entry: LogEntry }
   | { type: 'board'; config: BoardConfig; tasks: Task[] }
   | { type: 'task'; task: Task }
+  | { type: 'task.accepted'; requestId: string }
+  | { type: 'task.rejected'; requestId: string; message: string }
   | { type: 'error'; message: string };
 
 export type ClientMessage =
-  | { type: 'task.create'; task: NewTask }
+  | { type: 'task.create'; task: NewTask; requestId?: string }
+  | { type: 'team.create'; task: NewTask; requestId?: string; colleague?: { model: string; effort?: string } }
   | { type: 'task.cancel'; id: string };
 
 export const DAEMON_PORT = 4317;
@@ -140,6 +145,7 @@ export function describeModel(source: Source, model?: string): ModelInfo {
     const name = tier ? ` ${tier[0].toUpperCase()}${tier.slice(1)}` : '';
     return { kind: tier ?? 'codex', label: `GPT-${gpt[1]}${name}` };
   }
+  if (source === 'antigravity') return { kind: 'codex', label: model || 'Antigravity' };
   if (source === 'claude') return { kind: 'claude', label: model || 'Claude' };
   return { kind: 'codex', label: model || 'Codex' };
 }

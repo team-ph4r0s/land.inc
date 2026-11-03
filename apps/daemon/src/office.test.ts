@@ -1,3 +1,5 @@
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
 import { spawn } from 'node:child_process';
 import type { Task } from '@land/protocol';
 import { test } from 'node:test';
@@ -5,8 +7,36 @@ import assert from 'node:assert/strict';
 import { describeModel } from '@land/protocol';
 import { Store } from './store.ts';
 import { CodexAdapter } from './adapters/codex.ts';
-import { describeTool, testOutcome } from './activity.ts';
-import { TaskBoard } from './tasks.ts';
+import { commandOutcome, describeTool, testOutcome } from './activity.ts';
+import { TaskBoard, overlaps, readRecoverable, writeAtomic } from './tasks.ts';
+
+test('completed turns leave after five minutes, while active tools stay', () => {
+  const store = new Store();
+  const now = Date.now();
+  store.update('finished', { source: 'codex' }, now - 301_000);
+  store.turnEnd('finished', now - 301_000);
+  store.update('busy', { source: 'codex' }, now - 301_000);
+  store.tool('busy', 'exec_command', 'bash', 'working', now - 301_000);
+  (store as any).tick();
+  assert.equal(store.has('finished'), false);
+  assert.equal(store.has('busy'), true);
+});
+
+test('only a confirmed failed command starts a fire at its desk', () => {
+  const store = new Store();
+  const now = Date.now();
+  store.update('worker', { source: 'codex' }, now);
+  store.tool('worker', 'shell', 'bash', 'run', now);
+  assert.equal(commandOutcome('Process exited with code 1'), false);
+  assert.equal(commandOutcome('the word error is in the output'), undefined);
+  store.toolDone('worker', now + 1, false);
+  const snapshot = store.snapshot();
+  assert.equal(snapshot.type === 'snapshot' && snapshot.agents[0].fireAt, now + 1);
+  store.tool('worker', 'Read', 'read', 'read', now + 2);
+  store.toolDone('worker', now + 3, false);
+  const after = store.snapshot();
+  assert.equal(after.type === 'snapshot' && after.agents[0].fireAt, now + 1);
+});
 
 test('model ids become the character and the name the office shows', () => {
   assert.deepEqual(describeModel('claude', 'claude-sonnet-5-5'), { kind: 'sonnet', label: 'Sonnet 5.5' });
@@ -162,4 +192,77 @@ test('a confirmed tree kill ends as cancelled', { timeout: 10_000 }, async () =>
   } finally {
     cleanup(board);
   }
+});
+
+test('one writer per folder, readers are welcome', { timeout: 10_000 }, () => {
+  const board = new TaskBoard(new Store()) as any;
+  board.save = () => {};
+  const cwd = process.cwd();
+  board.tasks.unshift({ id: 'w', prompt: 'x', cwd, executor: 'codex', model: 'm', access: 'write', status: 'running', createdAt: Date.now() });
+  board.config = () => ({ projects: [cwd], outsideGit: [], executors: { codex: { available: true, models: [{ id: 'm', label: 'M' }] }, claude: { available: false, models: [] } } });
+  board.run = () => {};
+  const base = { prompt: 'y', executor: 'codex', model: 'm' } as const;
+  assert.throws(() => board.create({ ...base, cwd: cwd.toUpperCase(), access: 'write' }), /уже работает задача с правом записи/);
+  assert.doesNotThrow(() => board.create({ ...base, cwd, access: 'read' }));
+});
+
+test('write lock covers nested folders, case and links to the same folder', (t) => {
+  const { mkdtempSync, mkdirSync, symlinkSync } = require('node:fs') as typeof import('node:fs');
+  const { join } = require('node:path') as typeof import('node:path');
+  const { tmpdir } = require('node:os') as typeof import('node:os');
+  const root = mkdtempSync(join(tmpdir(), 'land-lock-'));
+  const repo = join(root, 'repo');
+  const other = join(root, 'other');
+  mkdirSync(join(repo, 'src'), { recursive: true });
+  mkdirSync(other);
+  // Some sandboxes may not create links; the rest of the check still runs there.
+  let linked = true;
+  try {
+    symlinkSync(repo, join(root, 'link'), 'junction');
+  } catch (e) {
+    linked = false;
+    t.diagnostic(`link check skipped: ${(e as NodeJS.ErrnoException).code}`);
+  }
+  assert.equal(overlaps(repo, join(repo, 'src')), true);
+  assert.equal(overlaps(join(repo, 'src'), repo), true);
+  if (linked) assert.equal(overlaps(repo, join(root, 'link')), true);
+  if (process.platform === 'win32') assert.equal(overlaps(repo, repo.toUpperCase()), true);
+  assert.equal(overlaps(repo, other), false);
+  assert.equal(overlaps(join(root, 'rep'), repo), false); // a shared name prefix is not nesting
+});
+
+test('saving survives a refused rename and a broken file can be read back from its copy', () => {
+  const { mkdtempSync, readFileSync, readdirSync, writeFileSync } = require('node:fs') as typeof import('node:fs');
+  const { join } = require('node:path') as typeof import('node:path');
+  const { tmpdir } = require('node:os') as typeof import('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'land-save-'));
+  const file = join(dir, 'tasks.json');
+  writeFileSync(file, '["old"]');
+  let tries = 0;
+  // Like the sandbox and a busy antivirus: replacing an existing file is refused.
+  const refuse = () => {
+    tries++;
+    throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+  };
+  writeAtomic(file, '["new"]', { rename: refuse });
+  assert.equal(tries, 4); // retried before falling back
+  assert.equal(readFileSync(file, 'utf8'), '["new"]');
+  assert.deepEqual(readdirSync(dir), ['tasks.json']);
+  // A crash during the direct write: the file is broken, the .tmp copy is whole.
+  writeFileSync(file, '["ne');
+  writeFileSync(`${file}.tmp`, '["new"]');
+  assert.equal(readRecoverable(file), '["new"]');
+  assert.equal(readRecoverable(join(dir, 'missing.json')), undefined);
+});
+
+test('after a crash between the copy and the file, the newer copy wins', () => {
+  const { mkdtempSync, writeFileSync } = require('node:fs') as typeof import('node:fs');
+  const { join } = require('node:path') as typeof import('node:path');
+  const { tmpdir } = require('node:os') as typeof import('node:os');
+  const file = join(mkdtempSync(join(tmpdir(), 'land-save-')), 'teams.json');
+  writeFileSync(file, '[]'); // valid, but stale
+  writeFileSync(`${file}.tmp`, '[["7",{}]]'); // the save that did not finish
+  assert.equal(readRecoverable(file), '[["7",{}]]');
+  writeFileSync(`${file}.tmp`, '[["7",{'); // cut off while being written
+  assert.equal(readRecoverable(file), '[]');
 });

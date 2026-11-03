@@ -7,8 +7,9 @@ const IDLE_AFTER_MS = 90_000;
 /** A tool call without a result for this long is most likely a permission prompt. */
 const WAIT_AFTER_MS = 12_000;
 /** Tools that legitimately run for a long time and should not be mistaken for a prompt. */
-const LONG_TOOLS = /^(Bash|PowerShell|Monitor|Agent|Task|WebSearch|WebFetch|shell|exec_command|local_shell|container\.exec|spawn_agent|wait)/;
+const LONG_TOOLS = /^(Bash|PowerShell|Monitor|Agent|Task|WebSearch|WebFetch|shell|exec_command|local_shell|container\.exec|spawn_agent|run_command|wait)/;
 const LEAVE_AFTER_MS = 45 * 60_000;
+const COMPLETED_LEAVE_AFTER_MS = 5 * 60_000;
 const SUBAGENT_LEAVE_AFTER_MS = 2 * 60_000;
 /**
  * A running tool or an open prompt keeps the agent in the office past the usual
@@ -112,6 +113,7 @@ export class Store extends EventEmitter<{ message: [ServerMessage] }> {
       a.state.mood = ok ? 'cool' : 'fail';
       a.state.moodAt = at;
     }
+    if (ok === false && a.state.activity === 'bash') a.state.fireAt = at;
     a.pendingTool = undefined;
     a.hookWait = undefined;
     if (a.state.activity === 'wait') this.setActivity(a, 'think', 'Обдумывает результат', at);
@@ -199,7 +201,7 @@ export class Store extends EventEmitter<{ message: [ServerMessage] }> {
     for (const a of [...this.agents.values()]) {
       const quiet = now - a.state.updatedAt;
       const busy = !!a.pendingTool || !!a.hookWait;
-      const leaveAfter = busy ? BUSY_LEAVE_AFTER_MS : a.state.parentId ? SUBAGENT_LEAVE_AFTER_MS : LEAVE_AFTER_MS;
+      const leaveAfter = busy ? BUSY_LEAVE_AFTER_MS : a.turnEnded ? COMPLETED_LEAVE_AFTER_MS : a.state.parentId ? SUBAGENT_LEAVE_AFTER_MS : LEAVE_AFTER_MS;
       if (quiet > leaveAfter) {
         this.remove(a.state.id);
         continue;

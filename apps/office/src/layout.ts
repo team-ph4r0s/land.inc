@@ -4,6 +4,7 @@ import type { Activity } from '@land/protocol';
 export const W = 24;
 export const H = 18;
 export const DOOR = { x: 11, y: H - 1 };
+export const HOME = { x: 14, y: H + 3 };
 
 export interface Tile {
   x: number;

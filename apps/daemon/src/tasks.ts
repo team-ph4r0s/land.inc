@@ -1,9 +1,9 @@
 import { spawn, spawnSync, execFileSync, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdirSync, openSync, readFileSync, readSync, closeSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, openSync, readFileSync, readSync, closeSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { BoardConfig, ModelOption, NewTask, Task } from '@land/protocol';
 import type { Store } from './store.ts';
 import { clip } from './activity.ts';
@@ -60,6 +60,14 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
     return this.tasks;
   }
 
+  /** Add a note to a task's result, e.g. why the team it belonged to stopped. */
+  annotate(id: string, note: string): void {
+    const task = this.tasks.find((t) => t.id === id);
+    if (!task) return;
+    task.result = task.result ? `${task.result}\n\n${note}` : note;
+    this.changed(task);
+  }
+
   config(): BoardConfig {
     if (this.cached && Date.now() - this.cached.at < CONFIG_TTL_MS) return this.cached.config;
     const claude = claudeBin();
@@ -103,8 +111,11 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
     if (!model) throw new Error('Модель недоступна');
     if (input.effort && !model.efforts?.includes(input.effort)) throw new Error('Такой уровень рассуждений модель не поддерживает');
     // A task being cancelled still holds its slot until its processes are gone.
-    if (this.tasks.filter((t) => t.status === 'starting' || t.status === 'running' || t.status === 'cancelling').length >= MAX_RUNNING)
-      throw new Error(`Одновременно выполняется не больше ${MAX_RUNNING} задач`);
+    const live = this.tasks.filter((t) => t.status === 'starting' || t.status === 'running' || t.status === 'cancelling');
+    if (live.length >= MAX_RUNNING) throw new Error(`Одновременно выполняется не больше ${MAX_RUNNING} задач`);
+    // One writer per folder: two agents editing the same files would trample each other's work.
+    if (input.access === 'write' && live.some((t) => t.access === 'write' && overlaps(t.cwd, cwd)))
+      throw new Error('В этой папке уже работает задача с правом записи. Дождитесь её завершения или выберите «Только чтение».');
 
     const task: Task = {
       id: randomUUID(),
@@ -240,6 +251,12 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
    */
   private pending = new Map<string, string>();
   private runs = new Map<string, { last?: string; final?: string; error?: string }>();
+  /** Untrimmed answers of recent tasks: a team looks for the colleague section, which is usually at the end. */
+  private full = new Map<string, string>();
+
+  fullResult(id: string): string | undefined {
+    return this.full.get(id);
+  }
   private codexEvents(task: Task, chunk: string): void {
     const text = (this.pending.get(task.id) ?? '') + chunk;
     const lines = text.split('\n');
@@ -275,6 +292,10 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
     task.status = status;
     task.finishedAt = Date.now();
     task.result = result && result.length > 4_000 ? result.slice(0, 4_000) + '…' : result;
+    if (result) {
+      this.full.set(task.id, result.slice(-200_000));
+      if (this.full.size > 20) this.full.delete(this.full.keys().next().value!);
+    }
     this.pending.delete(task.id);
     this.runs.delete(task.id);
     this.changed(task);
@@ -287,7 +308,7 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
 
   private load(): void {
     try {
-      const saved = JSON.parse(readFileSync(this.file, 'utf8'));
+      const saved = JSON.parse(readRecoverable(this.file) ?? 'null');
       if (!Array.isArray(saved)) return;
       this.tasks = saved.slice(0, KEEP_TASKS);
       for (const t of this.tasks) {
@@ -305,7 +326,7 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
   private save(): void {
     try {
       mkdirSync(dirname(this.file), { recursive: true });
-      writeFileSync(this.file, JSON.stringify(this.tasks, null, 2));
+      writeAtomic(this.file, JSON.stringify(this.tasks, null, 2));
     } catch (e) {
       console.log(`[board] не удалось сохранить задачи: ${(e as Error).message}`);
     }
@@ -362,6 +383,83 @@ function killTree(p: ChildProcess, sync = false, onResult?: (error?: string) => 
       else onResult?.((e as Error).message);
     }
   }
+}
+
+/**
+ * Save a file so that at every moment a complete copy exists on disk: first the whole
+ * text goes to `<file>.tmp`, then it is renamed over the file. Windows may refuse to
+ * replace a file (EPERM/EBUSY while an indexer or antivirus holds it, or in some
+ * sandboxes): after a few retries the file is written directly, and `.tmp` stays as
+ * the intact copy until that write has finished. readRecoverable() falls back to it.
+ */
+export function writeAtomic(path: string, data: string, ops: { rename: (from: string, to: string) => void } = { rename: renameSync }): void {
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, data);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      ops.rename(tmp, path);
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (!(code === 'EPERM' || code === 'EBUSY' || code === 'EACCES')) throw e;
+      if (attempt < 3) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (attempt + 1));
+        continue;
+      }
+      writeFileSync(path, data);
+      rmSync(tmp, { force: true });
+      return;
+    }
+  }
+}
+
+/**
+ * The latest saved text of a file written by writeAtomic. A whole `.tmp` exists only when
+ * a save did not finish, and it is then newer than the file, so it wins; a broken `.tmp`
+ * (cut off while being written) gives way to the previous, intact file.
+ */
+export function readRecoverable(path: string, valid: (text: string) => boolean = isJson): string | undefined {
+  for (const candidate of [`${path}.tmp`, path]) {
+    try {
+      const text = readFileSync(candidate, 'utf8');
+      if (valid(text)) return text;
+    } catch {
+      // try the next copy
+    }
+  }
+  return undefined;
+}
+
+function isJson(text: string): boolean {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Two folders overlap when one is the other or lies inside it, after following links
+ * (junctions, symlinks) and ignoring case on Windows: writers there can touch the same files.
+ */
+export function overlaps(a: string, b: string): boolean {
+  const canon = (p: string) => {
+    let real: string;
+    try {
+      real = realpathSync.native(p);
+    } catch {
+      real = resolve(p);
+    }
+    return process.platform === 'win32' ? real.toLowerCase() : real;
+  };
+  const inside = (outer: string, inner: string) => {
+    const rel = relative(outer, inner);
+    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  };
+  const x = canon(a);
+  const y = canon(b);
+  return inside(x, y) || inside(y, x);
 }
 
 function inGit(dir: string): boolean {

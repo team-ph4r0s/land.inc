@@ -5,7 +5,7 @@ const LABEL: Record<Activity, string> = {
   think: 'думает', write: 'пишет код', read: 'в архиве', bash: 'в серверной', web: 'в интернете',
   plan: 'у доски', talk: 'на встрече', wait: 'ждёт вас', idle: 'на кухне',
 };
-const SOURCE_NAME: Record<AgentState['source'], string> = { claude: 'Claude', codex: 'Codex', demo: 'Демо' };
+const SOURCE_NAME: Record<AgentState['source'], string> = { claude: 'Claude', codex: 'Codex', antigravity: 'Antigravity', demo: 'Демо' };
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => `&${{ '&': 'amp', '<': 'lt', '>': 'gt', '"': 'quot' }[c]};`);
 const hex = (n: number) => '#' + n.toString(16).padStart(6, '0');
@@ -88,7 +88,7 @@ export class Sidebar {
     let html = '';
     if (!states.size) {
       html += `<p class="empty">${this.online
-        ? 'В офисе пусто. Запустите сессию в Claude Code или Codex — агент придёт через дверь.'
+        ? 'В офисе пусто. Запустите сессию в Claude Code, Codex или Antigravity — агент придёт через дверь.'
         : 'Нет связи с демоном. Запустите <code>npm run dev</code> в корне репозитория.'}</p>`;
     }
     for (const [project, list] of [...byProject].sort()) {
@@ -115,11 +115,11 @@ export class Sidebar {
 
   private renderHead(): void {
     const badge = this.running ? ` <b>${this.running}</b>` : '';
-    this.head.innerHTML = `<header><h1>land<span>.inc</span></h1>
-      <div class="status ${this.online ? 'on' : 'off'}">${this.online ? `в офисе: ${this.count}` : 'нет связи'}</div></header>
+    this.head.innerHTML = `<header><div><span class="sidebar-eyebrow">ВАША КОМАНДА</span><h1>Офис и задачи</h1><p>События рабочего пространства</p></div>
+      <div class="status ${this.online ? 'on' : 'off'}">${this.online ? `● ${this.count} в офисе` : 'нет связи'}</div></header>
       <nav class="tabs">
-        <button type="button" data-tab="office" class="${this.tab === 'office' ? 'on' : ''}">Офис</button>
-        <button type="button" data-tab="tasks" class="${this.tab === 'tasks' ? 'on' : ''}">📌 Задачи${badge}</button>
+        <button type="button" data-tab="office" class="${this.tab === 'office' ? 'on' : ''}">Сотрудники</button>
+        <button type="button" data-tab="tasks" class="${this.tab === 'tasks' ? 'on' : ''}">Задачи${badge}</button>
       </nav>`;
   }
 }

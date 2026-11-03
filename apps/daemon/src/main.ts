@@ -4,10 +4,12 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { DAEMON_PORT, type ClientMessage, type ServerMessage } from '@land/protocol';
 import { Store } from './store.ts';
 import { ClaudeAdapter } from './adapters/claude.ts';
+import { AntigravityAdapter } from './adapters/antigravity.ts';
 import { CodexAdapter } from './adapters/codex.ts';
 import { startDemo } from './demo.ts';
 import { describeTool, needsUser } from './activity.ts';
 import { TaskBoard } from './tasks.ts';
+import { createTeamCoordinator } from './team.ts';
 
 const args = process.argv.slice(2);
 const port = Number(process.env.LAND_PORT ?? DAEMON_PORT);
@@ -17,8 +19,12 @@ if (args.includes('--demo')) startDemo(store);
 if (!args.includes('--no-real')) {
   new ClaudeAdapter(store).start();
   new CodexAdapter(store).start();
+  new AntigravityAdapter(store).start();
 }
 const board = new TaskBoard(store);
+const team = createTeamCoordinator(board, (message) => broadcast({ type: 'error', message }), (task, recipient) => {
+  if (task.agentId) store.log(task.agentId, { at: Date.now(), kind: 'system', text: `Передаёт ответ коллеге ${recipient}` });
+});
 
 /**
  * Transcripts are private. The daemon only listens on loopback, but any web page
@@ -83,6 +89,9 @@ function onClaudeHook(h: Record<string, any>): void {
     case 'PostToolUse':
       store.toolDone(id, now);
       break;
+    case 'PostToolUseFailure':
+      store.toolDone(id, now, false);
+      break;
     case 'Stop':
       store.turnEnd(id, now);
       break;
@@ -114,16 +123,26 @@ wss.on('connection', (ws) => {
     try {
       if (msg.type === 'task.create') {
         board.create(msg.task);
+        if (msg.requestId) send(ws, { type: 'task.accepted', requestId: msg.requestId });
+        broadcast({ type: 'board', config: board.config(), tasks: board.list() });
+      } else if (msg.type === 'team.create') {
+        team.startTeam(msg.task, msg.colleague);
+        if (msg.requestId) send(ws, { type: 'task.accepted', requestId: msg.requestId });
         broadcast({ type: 'board', config: board.config(), tasks: board.list() });
       } else if (msg.type === 'task.cancel') board.cancel(msg.id);
     } catch (e) {
-      send(ws, { type: 'error', message: (e as Error).message });
+      if ((msg.type === 'task.create' || msg.type === 'team.create') && msg.requestId)
+        send(ws, { type: 'task.rejected', requestId: msg.requestId, message: (e as Error).message });
+      else send(ws, { type: 'error', message: (e as Error).message });
     }
   });
   ws.on('close', () => clients.delete(ws));
 });
 store.on('message', broadcast);
-board.on('task', (task) => broadcast({ type: 'task', task }));
+board.on('task', (task) => {
+  broadcast({ type: 'task', task });
+  team.continueTeam(task);
+});
 
 server.listen(port, '127.0.0.1', () => {
   console.log(`[land] демон запущен: ws://127.0.0.1:${port}`);
