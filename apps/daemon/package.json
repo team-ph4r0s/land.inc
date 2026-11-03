@@ -1,0 +1,17 @@
+{
+  "name": "@land/daemon",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/main.ts",
+    "demo": "node --disable-warning=ExperimentalWarning src/main.ts --demo"
+  },
+  "dependencies": {
+    "@land/protocol": "*",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/ws": "^8.18.1"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "land-inc",
+  "private": true,
+  "type": "module",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:demo": "node scripts/dev.mjs --demo",
+    "daemon": "npm run start -w @land/daemon",
+    "office": "npm run dev -w @land/office",
+    "build": "npm run build -w @land/office",
+    "typecheck": "tsc -p apps/daemon && tsc -p apps/office"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,231 @@
+import { readdirSync, statSync, existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, join } from 'node:path';
+import type { Store } from '../store.ts';
+import { JsonlTail } from '../tail.ts';
+import { clip, describeTool } from '../activity.ts';
+
+const RECENT_MS = 45 * 60_000;
+const POLL_MS = 1_500;
+const DISCOVER_MS = 5_000;
+
+interface Tracked {
+  tail: JsonlTail;
+  id: string;
+  title?: string;
+  titled: boolean;
+  /** Nothing has been read from the file yet. */
+  fresh: boolean;
+  /** Imported history, hidden until the thread gets new activity. */
+  muted?: Rec;
+}
+
+type Rec = Record<string, any>;
+
+/**
+ * Codex (CLI and desktop app) writes each thread as a "rollout" JSONL under
+ * ~/.codex/sessions/YYYY/MM/DD/ and indexes threads in ~/.codex/state_*.sqlite.
+ * We find rollouts from both places and tail them.
+ */
+export class CodexAdapter {
+  private home = process.env.CODEX_HOME ?? join(homedir(), '.codex');
+  private files = new Map<string, Tracked>();
+  private known = new Map<string, { title?: string }>();
+  private lastDiscover = 0;
+
+  private store: Store;
+
+  constructor(store: Store) {
+    this.store = store;
+  }
+
+  start(): void {
+    if (!existsSync(this.home)) {
+      console.log(`[codex] ${this.home} не найден — Codex не установлен?`);
+      return;
+    }
+    console.log(`[codex] слежу за ${this.home}`);
+    void this.poll();
+    setInterval(() => void this.poll(), POLL_MS).unref();
+  }
+
+  private async poll(): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastDiscover > DISCOVER_MS) {
+      this.lastDiscover = now;
+      await this.discover(now);
+    }
+    for (const t of this.files.values()) {
+      const recs = t.tail.read() as Rec[];
+      if (!recs.length) continue;
+      if (t.fresh) {
+        t.fresh = false;
+        if (looksImported(recs)) {
+          t.muted = recs[0];
+          continue;
+        }
+      }
+      if (t.muted) {
+        // The user picked up an imported thread in Codex: it is a real agent now.
+        this.apply(t, { ...t.muted, timestamp: recs[0].timestamp });
+        t.muted = undefined;
+      }
+      for (const rec of recs) this.apply(t, rec);
+    }
+  }
+
+  private async discover(now: number): Promise<void> {
+    for (const [path, info] of await this.fromDatabase(now)) this.known.set(path, info);
+    for (const path of walkRollouts(join(this.home, 'sessions'))) if (!this.known.has(path)) this.known.set(path, {});
+
+    for (const [path, info] of this.known) {
+      if (this.files.has(path)) continue;
+      try {
+        if (now - statSync(path).mtimeMs > RECENT_MS) continue;
+      } catch {
+        continue;
+      }
+      const id = 'codex:' + (basename(path, '.jsonl').match(/[0-9a-f-]{36}$/i)?.[0] ?? basename(path));
+      this.files.set(path, { tail: new JsonlTail(path), id, title: info.title, titled: !!info.title, fresh: true });
+    }
+  }
+
+  /** Recently updated threads from the Codex state database, if node:sqlite is available. */
+  private async fromDatabase(now: number): Promise<Map<string, { title?: string }>> {
+    const out = new Map<string, { title?: string }>();
+    let files: string[];
+    try {
+      files = readdirSync(this.home).filter((f) => /^state_\d+\.sqlite$/.test(f));
+    } catch {
+      return out;
+    }
+    let sqlite: typeof import('node:sqlite');
+    try {
+      sqlite = await import('node:sqlite');
+    } catch {
+      return out;
+    }
+    for (const f of files) {
+      try {
+        const db = new sqlite.DatabaseSync(join(this.home, f), { readOnly: true });
+        const rows = db.prepare('SELECT rollout_path, title, updated_at FROM threads WHERE archived = 0').all() as Rec[];
+        db.close();
+        for (const r of rows) {
+          const updated = Number(r.updated_at) < 1e12 ? Number(r.updated_at) * 1000 : Number(r.updated_at);
+          if (now - updated < RECENT_MS && r.rollout_path) out.set(String(r.rollout_path), { title: r.title || undefined });
+        }
+      } catch {
+        // Schema changed or the database is locked; the sessions folder scan still works.
+      }
+    }
+    return out;
+  }
+
+  private apply(t: Tracked, rec: Rec): void {
+    const at = Date.parse(rec.timestamp) || Date.now();
+    const p: Rec = rec.payload ?? {};
+    const id = t.id;
+
+    switch (rec.type) {
+      case 'session_meta':
+      case 'turn_context': {
+        const patch: Parameters<Store['update']>[1] = { source: 'codex' };
+        if (typeof p.cwd === 'string') {
+          patch.cwd = p.cwd;
+          patch.project = basename(p.cwd);
+        }
+        if (typeof p.model === 'string') patch.model = p.model;
+        if (rec.type === 'session_meta') {
+          patch.startedAt = at;
+          patch.title = t.title ? clip(t.title, 48) : 'Codex';
+        }
+        this.store.update(id, patch, at);
+        return;
+      }
+      case 'response_item':
+        return this.responseItem(t, p, at);
+      case 'event_msg':
+        switch (p.type) {
+          case 'task_started':
+            return this.store.thinking(id, 'Взялся за задачу', at);
+          case 'task_complete':
+          case 'turn_aborted':
+            return this.store.turnEnd(id, at);
+          case 'exec_approval_request':
+          case 'apply_patch_approval_request':
+            return this.store.waiting(id, 'Ждёт вашего разрешения', at);
+          case 'request_user_input':
+            return this.store.waiting(id, 'Задаёт вам вопрос', at);
+        }
+    }
+  }
+
+  private responseItem(t: Tracked, p: Rec, at: number): void {
+    const id = t.id;
+    switch (p.type) {
+      case 'message': {
+        const text = (Array.isArray(p.content) ? p.content : [])
+          .map((c: Rec) => c.text)
+          .filter((s: unknown) => typeof s === 'string')
+          .join('\n');
+        if (!text.trim() || /^\s*<(environment_context|user_instructions|permissions)/.test(text) || text.startsWith('# AGENTS.md')) return;
+        if (p.role === 'user') {
+          if (!t.titled) {
+            this.store.update(id, { source: 'codex', title: clip(text, 48) }, at);
+            t.titled = true;
+          }
+          this.store.log(id, { at, kind: 'user', text });
+          this.store.thinking(id, 'Читает задачу', at);
+        } else if (p.role === 'assistant') {
+          this.store.log(id, { at, kind: 'assistant', text });
+        }
+        return;
+      }
+      case 'reasoning':
+        return this.store.thinking(id, 'Размышляет', at);
+      case 'function_call':
+      case 'custom_tool_call': {
+        let input: Rec = {};
+        try {
+          input = typeof p.arguments === 'string' ? JSON.parse(p.arguments) : (p.input && typeof p.input === 'object' ? p.input : {});
+        } catch {
+          // apply_patch sends a raw patch string as input
+        }
+        const { activity, detail } = describeTool(p.name ?? 'tool', input);
+        return this.store.tool(id, p.name ?? 'tool', activity, detail, at);
+      }
+      case 'local_shell_call': {
+        const { activity, detail } = describeTool('local_shell', { command: p.action?.command });
+        return this.store.tool(id, 'local_shell', activity, detail, at);
+      }
+      case 'web_search_call':
+        return this.store.tool(id, 'web_search', 'web', `Гуглит «${clip(p.action?.query ?? '', 40)}»`, at);
+      case 'function_call_output':
+      case 'custom_tool_call_output':
+        return this.store.toolDone(id, at);
+    }
+  }
+}
+
+/**
+ * Codex Desktop can import other agents' history (e.g. Claude Code sessions):
+ * such a rollout is written in one go, whole turns within a few milliseconds,
+ * while a real turn takes seconds.
+ */
+function looksImported(recs: Rec[]): boolean {
+  if (recs[0]?.type !== 'session_meta') return false;
+  const start = Date.parse(recs[0].timestamp);
+  const end = Date.parse(recs[recs.length - 1].timestamp);
+  const completed = recs.some((r) => r.type === 'event_msg' && r.payload?.type === 'task_complete');
+  return completed && end - start < 1_500;
+}
+
+function walkRollouts(dir: string): string[] {
+  try {
+    return readdirSync(dir, { recursive: true, encoding: 'utf8' })
+      .filter((f) => /rollout-.*\.jsonl$/.test(f))
+      .map((f) => join(dir, f));
+  } catch {
+    return [];
+  }
+}

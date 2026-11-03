@@ -1,0 +1,6 @@
+{
+  "name": "@land/protocol",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" }
+}
