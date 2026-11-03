@@ -13,6 +13,8 @@ interface Tracked {
   tail: JsonlTail;
   id: string;
   parentId?: string;
+  /** Last known title, to bring back an agent that left after a quiet spell. */
+  title?: string;
   titled: boolean;
 }
 
@@ -87,6 +89,7 @@ export class ClaudeAdapter {
       const meta = readMeta(path.replace(/\.jsonl$/, '.meta.json'));
       if (meta) {
         this.store.update(tracked.id, { source: 'claude', parentId: sessionId, title: meta });
+        tracked.title = meta;
         tracked.titled = true;
       }
     } else {
@@ -109,7 +112,8 @@ export class ClaudeAdapter {
     if (rec.type === 'custom-title' || rec.type === 'agent-name' || rec.type === 'summary') {
       const title = rec.customTitle ?? rec.agentName ?? rec.summary;
       if (typeof title === 'string' && !t.parentId) {
-        this.store.update(id, { source: 'claude', title: clip(title, 48) });
+        t.title = clip(title, 48);
+        this.store.update(id, { source: 'claude', title: t.title });
         t.titled = true;
       }
       return;
@@ -122,7 +126,10 @@ export class ClaudeAdapter {
       patch.project = basename(rec.cwd);
     }
     if (rec.message?.model && !String(rec.message.model).startsWith('<')) patch.model = rec.message.model;
-    if (!this.store.has(id)) patch.startedAt = at;
+    if (!this.store.has(id)) {
+      patch.startedAt = at;
+      if (id === t.id && t.title) patch.title = t.title;
+    }
     this.store.update(id, patch, at);
 
     const content = rec.message?.content;
@@ -138,11 +145,13 @@ export class ClaudeAdapter {
           }
           const isPrompt = !rec.toolUseResult;
           if (!t.titled && isPrompt) {
+            if (id === t.id) t.title = clip(b.text, 48);
             this.store.update(id, { source: 'claude', title: clip(b.text, 48) }, at);
             t.titled = true;
           }
           this.store.log(id, { at, kind: 'user', text: b.text });
-          this.store.thinking(id, 'Читает задачу', at);
+          if (isPrompt) this.store.newTurn(id, 'Читает задачу', at);
+          else this.store.thinking(id, 'Читает задачу', at);
         }
       }
       return;

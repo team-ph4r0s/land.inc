@@ -14,6 +14,7 @@ interface Tracked {
   id: string;
   title?: string;
   titled: boolean;
+  metadata?: Parameters<Store['update']>[1];
   /** Nothing has been read from the file yet. */
   fresh: boolean;
   /** Imported history, hidden until the thread gets new activity. */
@@ -126,19 +127,24 @@ export class CodexAdapter {
     const p: Rec = rec.payload ?? {};
     const id = t.id;
 
+    // The agent went home after a quiet spell. Only real work brings it back, with the
+    // metadata it had; bookkeeping (token counts, turn context) just updates what we know.
+    const missing = rec.type !== 'session_meta' && !this.store.has(id);
+    if (missing && !wakesAgent(rec)) {
+      if (rec.type === 'turn_context') t.metadata = { ...t.metadata, ...contextPatch(p) };
+      return;
+    }
+    if (missing) this.store.update(id, t.metadata ?? { source: 'codex', title: t.title ? clip(t.title, 48) : 'Codex' }, at);
+
     switch (rec.type) {
       case 'session_meta':
       case 'turn_context': {
-        const patch: Parameters<Store['update']>[1] = { source: 'codex' };
-        if (typeof p.cwd === 'string') {
-          patch.cwd = p.cwd;
-          patch.project = basename(p.cwd);
-        }
-        if (typeof p.model === 'string') patch.model = p.model;
+        const patch = contextPatch(p);
         if (rec.type === 'session_meta') {
           patch.startedAt = at;
           patch.title = t.title ? clip(t.title, 48) : 'Codex';
         }
+        t.metadata = { ...t.metadata, ...patch };
         this.store.update(id, patch, at);
         return;
       }
@@ -147,7 +153,7 @@ export class CodexAdapter {
       case 'event_msg':
         switch (p.type) {
           case 'task_started':
-            return this.store.thinking(id, 'Взялся за задачу', at);
+            return this.store.newTurn(id, 'Взялся за задачу', at);
           case 'task_complete':
           case 'turn_aborted':
             return this.store.turnEnd(id, at);
@@ -164,18 +170,16 @@ export class CodexAdapter {
     const id = t.id;
     switch (p.type) {
       case 'message': {
-        const text = (Array.isArray(p.content) ? p.content : [])
-          .map((c: Rec) => c.text)
-          .filter((s: unknown) => typeof s === 'string')
-          .join('\n');
-        if (!text.trim() || /^\s*<(environment_context|user_instructions|permissions)/.test(text) || text.startsWith('# AGENTS.md')) return;
+        const text = messageText(p);
+        if (!text) return;
         if (p.role === 'user') {
           if (!t.titled) {
             this.store.update(id, { source: 'codex', title: clip(text, 48) }, at);
+            t.metadata = { ...t.metadata, source: 'codex', title: clip(text, 48) };
             t.titled = true;
           }
           this.store.log(id, { at, kind: 'user', text });
-          this.store.thinking(id, 'Читает задачу', at);
+          this.store.newTurn(id, 'Читает задачу', at);
         } else if (p.role === 'assistant') {
           this.store.log(id, { at, kind: 'assistant', text });
         }
@@ -205,6 +209,37 @@ export class CodexAdapter {
         return this.store.toolDone(id, at);
     }
   }
+}
+
+function contextPatch(p: Rec): Parameters<Store['update']>[1] {
+  const patch: Parameters<Store['update']>[1] = { source: 'codex' };
+  if (typeof p.cwd === 'string') {
+    patch.cwd = p.cwd;
+    patch.project = basename(p.cwd);
+  }
+  if (typeof p.model === 'string') patch.model = p.model;
+  return patch;
+}
+
+/** Text of a message item, or '' for empty messages and injected context (AGENTS.md, environment). */
+function messageText(p: Rec): string {
+  const text = (Array.isArray(p.content) ? p.content : [])
+    .map((c: Rec) => c.text)
+    .filter((s: unknown) => typeof s === 'string')
+    .join('\n');
+  if (!text.trim() || /^\s*<(environment_context|user_instructions|permissions)/.test(text) || text.startsWith('# AGENTS.md')) return '';
+  return text;
+}
+
+const WAKING_ITEMS = new Set(['reasoning', 'function_call', 'custom_tool_call', 'local_shell_call', 'web_search_call']);
+const WAKING_EVENTS = new Set(['task_started', 'exec_approval_request', 'apply_patch_approval_request', 'request_user_input']);
+
+/** Records that mean the agent is working (or needs the user) again. */
+function wakesAgent(rec: Rec): boolean {
+  const p: Rec = rec.payload ?? {};
+  if (rec.type === 'event_msg') return WAKING_EVENTS.has(p.type);
+  if (rec.type !== 'response_item') return false;
+  return WAKING_ITEMS.has(p.type) || (p.type === 'message' && !!messageText(p));
 }
 
 /**

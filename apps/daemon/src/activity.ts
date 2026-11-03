@@ -61,3 +61,12 @@ export function describeTool(name: string, input: Input = {}): { activity: Activ
       return { activity: 'write', detail: clip(n, 40) };
   }
 }
+
+/**
+ * Whether a Claude Code `Notification` hook means the agent is blocked on the user.
+ * The same hook also reports idling ("waiting for your input"), logins and the like.
+ */
+export function needsUser(h: { notification_type?: unknown; message?: unknown }): boolean {
+  if (typeof h.notification_type === 'string') return h.notification_type === 'permission_prompt' || h.notification_type === 'elicitation_dialog';
+  return /permission|approv/i.test(str(h.message));
+}

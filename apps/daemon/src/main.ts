@@ -1,4 +1,4 @@
-import { createServer } from 'node:http';
+import { createServer, type IncomingMessage } from 'node:http';
 import { basename } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { DAEMON_PORT, type ServerMessage } from '@land/protocol';
@@ -6,7 +6,7 @@ import { Store } from './store.ts';
 import { ClaudeAdapter } from './adapters/claude.ts';
 import { CodexAdapter } from './adapters/codex.ts';
 import { startDemo } from './demo.ts';
-import { describeTool } from './activity.ts';
+import { describeTool, needsUser } from './activity.ts';
 
 const args = process.argv.slice(2);
 const port = Number(process.env.LAND_PORT ?? DAEMON_PORT);
@@ -25,16 +25,13 @@ if (!args.includes('--no-real')) {
  */
 function allowedOrigin(origin: string | undefined): boolean {
   if (!origin) return true;
-  try {
-    const host = new URL(origin).hostname;
-    return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === 'tauri.localhost';
-  } catch {
-    return false;
-  }
+  // Vite answers on both names, and the app's browser pane opens localhost.
+  const origins = (process.env.LAND_ALLOWED_ORIGINS ?? 'http://127.0.0.1:5173,http://localhost:5173').split(',').map((s) => s.trim());
+  return origins.includes(origin);
 }
 
 const server = createServer((req, res) => {
-  if (!allowedOrigin(req.headers.origin)) {
+  if (req.headers.host !== `127.0.0.1:${port}` || !allowedOrigin(req.headers.origin)) {
     res.writeHead(403).end();
     return;
   }
@@ -63,17 +60,18 @@ function onClaudeHook(h: Record<string, any>): void {
   const id = h.session_id;
   if (typeof id !== 'string') return;
   const now = Date.now();
+  // Only notifications that ask the user for something change the office; ignoring the
+  // rest before creating the agent keeps informational hooks from spawning anyone.
+  if (h.hook_event_name === 'Notification' && !needsUser(h)) return;
   if (!store.has(id)) {
     store.update(id, { source: 'claude', cwd: h.cwd ?? '', project: h.cwd ? basename(h.cwd) : '' }, now);
   }
   switch (h.hook_event_name) {
     case 'Notification':
-      // Also fired after a minute of idling; that agent has finished and stays in the kitchen.
-      if (h.notification_type === 'idle_prompt' || /waiting for your input/i.test(h.message ?? '')) break;
       store.waiting(id, h.message ?? 'Ждёт вас', now);
       break;
     case 'UserPromptSubmit':
-      store.thinking(id, 'Читает задачу', now);
+      store.newTurn(id, 'Читает задачу', now);
       break;
     case 'PreToolUse': {
       const { activity, detail } = describeTool(h.tool_name ?? 'tool', h.tool_input ?? {});
@@ -89,7 +87,8 @@ function onClaudeHook(h: Record<string, any>): void {
   }
 }
 
-const wss = new WebSocketServer({ server, verifyClient: ({ origin }: { origin: string }) => allowedOrigin(origin) });
+const wss = new WebSocketServer({ server, verifyClient: ({ origin, req }: { origin: string; req: IncomingMessage }) =>
+  req.headers.host === `127.0.0.1:${port}` && !!origin && allowedOrigin(origin) });
 const clients = new Set<WebSocket>();
 wss.on('connection', (ws) => {
   clients.add(ws);

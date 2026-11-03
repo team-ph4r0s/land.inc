@@ -10,6 +10,11 @@ const WAIT_AFTER_MS = 12_000;
 const LONG_TOOLS = /^(Bash|PowerShell|Monitor|Agent|Task|WebSearch|WebFetch|shell|exec_command|local_shell|container\.exec|spawn_agent|wait)/;
 const LEAVE_AFTER_MS = 45 * 60_000;
 const SUBAGENT_LEAVE_AFTER_MS = 2 * 60_000;
+/**
+ * A running tool or an open prompt keeps the agent in the office past the usual
+ * timeout, but not forever: a session killed mid-prompt never writes a result.
+ */
+export const BUSY_LEAVE_AFTER_MS = 4 * 60 * 60_000;
 
 interface Internal {
   state: AgentState;
@@ -23,6 +28,10 @@ interface Internal {
 
 export type AgentPatch = Partial<Omit<AgentState, 'id' | 'source'>> & { source: AgentState['source'] };
 
+/** What an agent that went home is remembered by, so it comes back as itself. */
+type Identity = Pick<AgentState, 'title' | 'project' | 'cwd' | 'parentId' | 'model'>;
+const DEPARTED_LIMIT = 500;
+
 /**
  * Holds every agent the adapters have seen and turns raw transcript facts into
  * office activities. Adapters only report what happened; time-based transitions
@@ -30,6 +39,7 @@ export type AgentPatch = Partial<Omit<AgentState, 'id' | 'source'>> & { source: 
  */
 export class Store extends EventEmitter<{ message: [ServerMessage] }> {
   private agents = new Map<string, Internal>();
+  private departed = new Map<string, Identity>();
 
   constructor() {
     super();
@@ -69,6 +79,13 @@ export class Store extends EventEmitter<{ message: [ServerMessage] }> {
         log: [],
         turnEnded: false,
       };
+      // Whoever brings the agent back (a hook, a transcript record) may know only part
+      // of it; start from what it was when it left.
+      const known = this.departed.get(id);
+      if (known) {
+        Object.assign(a.state, known);
+        this.departed.delete(id);
+      }
       this.agents.set(id, a);
     }
     Object.assign(a.state, patch);
@@ -96,7 +113,23 @@ export class Store extends EventEmitter<{ message: [ServerMessage] }> {
     else this.touch(a, at);
   }
 
-  /** New prompt from the user, or the model kept reasoning: back to the desk. */
+  /**
+   * The user sent a new prompt. Anything still pending belongs to an earlier turn
+   * that never finished (the session was killed mid-tool), so it is dropped.
+   *
+   * The same prompt can arrive twice, from the UserPromptSubmit hook and later from
+   * the transcript poll. A tool that started after the prompt belongs to this very
+   * turn, so a late copy of the prompt must leave it, and the activity, alone.
+   */
+  newTurn(id: string, detail: string, at: number): void {
+    const a = this.agents.get(id);
+    if (!a) return;
+    if (a.pendingTool && a.pendingTool.at >= at) return this.touch(a, at);
+    a.pendingTool = undefined;
+    this.thinking(id, detail, at);
+  }
+
+  /** The model kept reasoning: back to the desk. */
   thinking(id: string, detail: string, at: number): void {
     const a = this.agents.get(id);
     if (!a) return;
@@ -132,7 +165,13 @@ export class Store extends EventEmitter<{ message: [ServerMessage] }> {
   }
 
   remove(id: string): void {
-    if (this.agents.delete(id)) this.emit('message', { type: 'remove', id });
+    const a = this.agents.get(id);
+    if (!a) return;
+    const { title, project, cwd, parentId, model } = a.state;
+    this.departed.set(id, { title, project, cwd, parentId, model });
+    if (this.departed.size > DEPARTED_LIMIT) this.departed.delete(this.departed.keys().next().value!);
+    this.agents.delete(id);
+    this.emit('message', { type: 'remove', id });
   }
 
   private setActivity(a: Internal, activity: Activity, detail: string, at: number): void {
@@ -154,7 +193,8 @@ export class Store extends EventEmitter<{ message: [ServerMessage] }> {
     const now = Date.now();
     for (const a of [...this.agents.values()]) {
       const quiet = now - a.state.updatedAt;
-      const leaveAfter = a.state.parentId ? SUBAGENT_LEAVE_AFTER_MS : LEAVE_AFTER_MS;
+      const busy = !!a.pendingTool || !!a.hookWait;
+      const leaveAfter = busy ? BUSY_LEAVE_AFTER_MS : a.state.parentId ? SUBAGENT_LEAVE_AFTER_MS : LEAVE_AFTER_MS;
       if (quiet > leaveAfter) {
         this.remove(a.state.id);
         continue;
