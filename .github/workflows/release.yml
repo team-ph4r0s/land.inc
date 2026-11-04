@@ -1,0 +1,67 @@
+name: Release office
+on:
+  push:
+    tags: ['v*.*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Версия x.y (например 1.1)'
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: office-release
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Set version
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          $releaseVersion = if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') { $env:INPUT_VERSION } else { $env:GITHUB_REF_NAME -replace '^v', '' }
+          if ($releaseVersion -notmatch '^(0|[1-9]\d{0,3})\.(0|[1-9]\d{0,3})$') { throw 'Version must be x.y' }
+          if ($env:GITHUB_EVENT_NAME -eq 'push' -and (Get-Content VERSION -Raw).Trim() -ne $releaseVersion) { throw 'Tag and VERSION differ' }
+          $env:RELEASE_VERSION = $releaseVersion
+          node scripts/release-version.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "RELEASE_VERSION=$releaseVersion" >> $env:GITHUB_ENV
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Commit and tag manual release
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          git rev-parse --verify "refs/tags/v$env:RELEASE_VERSION" 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'Tag already exists' }
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add VERSION package.json package-lock.json
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 1) { git commit -m "release: $env:RELEASE_VERSION"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+          git tag -a "v$env:RELEASE_VERSION" -m "land.inc $env:RELEASE_VERSION"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git push --atomic origin HEAD:main "refs/tags/v$env:RELEASE_VERSION"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "v$env:RELEASE_VERSION" --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create "v$env:RELEASE_VERSION" --verify-tag --repo $env:GITHUB_REPOSITORY --title "land.inc $env:RELEASE_VERSION" --generate-notes
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }

@@ -84,7 +84,11 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
     this.changed(task);
   }
 
-  config(): BoardConfig {
+  config(refresh = false): BoardConfig {
+    if (refresh) {
+      this.cached = undefined;
+      for (const executor of this.executors.values()) executor.refresh?.();
+    }
     if (this.cached && Date.now() - this.cached.at < CONFIG_TTL_MS) return this.cached.config;
     const projects = this.projects();
     const executors = Object.fromEntries(
@@ -214,9 +218,11 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
     let child: ChildProcess;
     let output: OutputParser;
     let stdin: string | undefined;
+    let command: string | undefined;
     try {
       const cmd = executor.command();
       if (!cmd) throw new Error('CLI не найден');
+      command = [cmd.command, ...cmd.args].join(' ');
       const prepared = executor.prepare(
         task,
         (agentId) => {
@@ -236,7 +242,7 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch (e) {
-      return this.finish(task, 'failed', `Не удалось запустить: ${(e as Error).message}`);
+      return this.finish(task, 'failed', launchError(e as NodeJS.ErrnoException, command));
     }
     this.procs.set(task.id, child);
     this.outputs.set(task.id, output);
@@ -251,7 +257,7 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
       task.status = 'running';
       this.changed(task);
     });
-    child.on('error', (e) => this.finish(task, 'failed', `Не удалось запустить: ${e.message}`));
+    child.on('error', (e) => this.finish(task, 'failed', launchError(e, command)));
     child.on('close', (code) => {
       this.procs.delete(task.id);
       const result = output.finish(code, stdout, stderr);
@@ -335,6 +341,13 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
       .slice(0, 40)
       .map(([cwd]) => cwd);
   }
+}
+
+function launchError(error: NodeJS.ErrnoException, command?: string): string {
+  let message = `Не удалось запустить${command ? ` CLI «${command}»` : ''}: ${error.message}`;
+  if (error.code === 'EPERM' || error.code === 'EACCES')
+    message += '. ОС запретила запуск. Проверьте, что CLI запускается из обычного терминала; если да — проверьте журнал блокировок Windows или антивируса.';
+  return message;
 }
 
 /** Stop a process and everything it started. `onResult` is called once: no argument on success, the reason otherwise. */

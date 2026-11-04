@@ -48,6 +48,8 @@ export interface Executor {
   readonly id: ExecutorId;
   status(): ExecutorStatus;
   command(): Command | undefined;
+  /** Forget CLI discovery after the user installs or updates an agent. */
+  refresh?(): void;
   /**
    * `onAgent` reports an agent id learned from the output (Codex prints its thread id).
    * With `resume`, the run continues that agent session instead of starting a new one.

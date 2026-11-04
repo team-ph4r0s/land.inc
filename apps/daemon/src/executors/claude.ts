@@ -1,11 +1,10 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ModelOption, Task } from '@land/protocol';
 import { clip } from '../activity.ts';
-import { compareVersions, headCwd, mtime, onPath, safeDir } from './files.ts';
+import { cliCommand, cliOnPath, compareVersions, headCwd, mtime, safeDir } from './files.ts';
 import type { Command, Executor, ExecutorStatus, OutputParser, PreparedRun } from './types.ts';
 
 export const CLAUDE_MODELS: ModelOption[] = [
@@ -30,11 +29,12 @@ export class ClaudeExecutor implements Executor {
     this.override = options.command;
   }
 
+  refresh(): void { this.found = undefined; }
+
   command(): Command | undefined {
     if (this.override) return this.override;
     if (this.found === undefined) {
-      const bin = claudeBin();
-      this.found = bin ? { command: bin, args: [] } : null;
+      this.found = claudeBin() ?? null;
     }
     return this.found ?? undefined;
   }
@@ -109,7 +109,7 @@ function signedIn(cmd: Command): boolean {
   }
 }
 
-function claudeBin(): string | undefined {
+function claudeBin(): Command | undefined {
   const candidates: string[] = [];
   if (process.env.LAND_CLAUDE_BIN) candidates.push(process.env.LAND_CLAUDE_BIN);
   const data = join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), 'Claude-Data');
@@ -118,6 +118,11 @@ function claudeBin(): string | undefined {
     const versions = safeDir(root).sort(compareVersions).reverse();
     for (const v of versions) for (const build of safeDir(join(root, v))) candidates.push(join(root, v, build, 'claude.exe'));
   }
-  candidates.push(join(homedir(), '.claude', 'local', 'claude'), join(homedir(), '.local', 'bin', 'claude'));
-  return candidates.find((c) => existsSync(c)) ?? onPath('claude');
+  const name = process.platform === 'win32' ? 'claude.exe' : 'claude';
+  candidates.push(join(homedir(), '.claude', 'local', name), join(homedir(), '.local', 'bin', name));
+  for (const bin of candidates) {
+    const cmd = cliCommand(bin, 'claude', '@anthropic-ai/claude-code');
+    if (cmd) return cmd;
+  }
+  return cliOnPath('claude', '@anthropic-ai/claude-code');
 }

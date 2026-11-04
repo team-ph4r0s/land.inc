@@ -1,4 +1,4 @@
-import type { Access, BoardConfig, ClientMessage, Executor, Task } from '@land/protocol';
+import type { Access, BoardConfig, ClientMessage, Executor, ModelOption, Task } from '@land/protocol';
 
 const STATUS: Record<Task['status'], string> = {
   starting: 'запускается',
@@ -9,6 +9,12 @@ const STATUS: Record<Task['status'], string> = {
   cancelled: 'отменена',
 };
 const EXECUTOR: Record<Executor, string> = { claude: 'Claude', codex: 'Codex', antigravity: 'Antigravity' };
+const EXECUTORS = Object.keys(EXECUTOR) as Executor[];
+const SETUP: Record<Executor, { url: string; install: string; login: string }> = {
+  claude: { url: 'https://code.claude.com/docs/en/setup', install: 'Windows PowerShell: irm https://claude.ai/install.ps1 | iex\nmacOS / Linux: curl -fsSL https://claude.ai/install.sh | bash', login: 'claude auth login' },
+  codex: { url: 'https://developers.openai.com/codex/cli', install: 'npm install -g @openai/codex', login: 'codex login' },
+  antigravity: { url: 'https://antigravity.google/docs/getting-started?tab=cli', install: 'Windows PowerShell: irm https://antigravity.google/cli/install.ps1 | iex\nmacOS / Linux: curl -fsSL https://antigravity.google/cli/install.sh | bash', login: 'agy' },
+};
 // Claude has no file system sandbox here: only its permission mode, plus your own allow rules from Claude's settings.
 const ACCESS_HINT: Record<Executor, Record<Access, string>> = {
   claude: {
@@ -48,6 +54,7 @@ export class TaskBoardPanel {
   private folderRequest?: string;
   private folderPath?: string;
   private folderParent?: string;
+  private initialized = false;
   /**
    * The reply form under a finished task. The list re-renders on every update, so what
    * the user typed lives here and is put back each time.
@@ -71,6 +78,9 @@ export class TaskBoardPanel {
     this.config = config;
     this.tasks = tasks;
     this.fillOptions();
+    const refresh = this.form.querySelector<HTMLButtonElement>('[data-refresh]')!;
+    refresh.disabled = false;
+    refresh.textContent = 'Проверить доступность';
     this.renderList();
   }
 
@@ -84,6 +94,9 @@ export class TaskBoardPanel {
   showError(message: string): void {
     this.error.textContent = message;
     this.error.hidden = false;
+    const refresh = this.form.querySelector<HTMLButtonElement>('[data-refresh]')!;
+    refresh.disabled = false;
+    refresh.textContent = 'Проверить доступность';
   }
 
   submissionResult(id: string, error?: string): void {
@@ -96,7 +109,7 @@ export class TaskBoardPanel {
     const prompt = this.field<HTMLTextAreaElement>('prompt');
     if (!error && prompt.value.trim() === this.pending.prompt) prompt.value = '';
     this.pending = undefined;
-    this.form.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled = false;
+    this.updateTeam();
     if (error) this.showError(error);
   }
 
@@ -105,6 +118,9 @@ export class TaskBoardPanel {
     if (this.reply?.pending) this.submissionResult(this.reply.pending, lost);
     if (this.pending) this.submissionResult(this.pending.id, lost);
     if (this.folderRequest) { this.folderRequest = undefined; this.folderMessage('Нет связи с демоном'); }
+    const refresh = this.form.querySelector<HTMLButtonElement>('[data-refresh]')!;
+    refresh.disabled = false;
+    refresh.textContent = 'Проверить доступность';
   }
 
   foldersResult(result: { requestId: string; path?: string; parent?: string; folders?: string[]; error?: string }): void {
@@ -161,6 +177,12 @@ export class TaskBoardPanel {
           </div>
         </div>
         <p class="note" data-note="executor" hidden></p>
+        <details class="cli-setup">
+          <summary>Агенты: доступность и установка</summary>
+          <div data-cli-status></div>
+          <p class="note">После установки или входа нажмите «Проверить доступность». Если менялся PATH, перезапустите офис из нового терминала.</p>
+          <button type="button" data-refresh>Проверить доступность</button>
+        </details>
         <div class="row">
           <label>Модель <select name="model"></select></label>
           <label>Рассуждения <select name="effort"></select></label>
@@ -178,21 +200,27 @@ export class TaskBoardPanel {
         </label>
         <label class="team-choice"><input type="checkbox" name="team" /> Совместная работа</label>
         <div data-team-options hidden>
-          <p class="note">Основной исполнитель и его модель выбираются выше: он выполняет большую часть работы по плану и пишет код, если разрешены правки. Здесь назначьте планирование и проверку.</p>
-          <div class="row">
-          <label>План и назначение <select name="plannerExecutor"><option value="claude">Claude</option><option value="codex">Codex</option><option value="antigravity" selected>Antigravity</option></select></label>
+          <p class="note">Основной исполнитель выбран выше. Включите нужные этапы и агентов. Устанавливать все CLI не требуется.</p>
+          <label class="team-choice"><input type="checkbox" name="usePlanner" /> Планирование</label>
+          <div class="row" data-planner-options hidden>
+          <label>Планировщик <select name="plannerExecutor">${EXECUTORS.map((ex) => `<option value="${ex}">${EXECUTOR[ex]}</option>`).join('')}</select></label>
           <label>Модель <select name="plannerModel"></select></label>
           <label>Рассуждения <select name="plannerEffort"></select></label>
           </div>
-          <div class="row">
-          <label>Проверка <select name="colleagueExecutor"><option value="claude">Claude</option><option value="codex" selected>Codex</option><option value="antigravity">Antigravity</option></select></label>
-          <label><span data-colleague-label>Модель коллеги</span> <select name="colleagueModel"></select></label>
-          <label>Рассуждения <select name="colleagueEffort"></select></label>
-          </div>
-          <p class="note">Четыре последовательных хода: планирование и назначение выбранного исполнителя, выполнение, проверка, итог исполнителя. Планирование и проверка работают с доступом только на чтение; возможности режима зависят от агента и его настроек.</p>
+          <p class="note">Проверяющие (по порядку). Можно выбрать того же провайдера, что и у исполнителя: это будет отдельная сессия.</p>
+          ${EXECUTORS.map((ex) => `<div class="team-member" data-reviewer="${ex}">
+            <label class="team-choice"><input type="checkbox" name="review-${ex}" /> ${EXECUTOR[ex]} <span data-review-status></span></label>
+            <div class="row" data-review-options hidden>
+              <label>Модель <select name="reviewModel-${ex}"></select></label>
+              <label>Рассуждения <select name="reviewEffort-${ex}"></select></label>
+            </div>
+          </div>`).join('')}
+          <p class="note" data-team-summary></p>
+          <p class="note">Планирование и проверка работают только на чтение с ограничениями выбранного CLI. Каждый этап — отдельный запрос к модели с её лимитами.</p>
         </div>
+        <p class="note warn" data-team-issue role="status" hidden></p>
         <p class="error" hidden></p>
-        <button type="submit" class="primary">Отправить команде</button>
+        <button type="submit" class="primary">Отправить задачу</button>
       </form>
       <h3>Задачи</h3>
       <div class="tasks"></div>`;
@@ -207,7 +235,11 @@ export class TaskBoardPanel {
         const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-value]');
         if (!b || b.disabled) return;
         this.setSeg(seg.dataset.name!, b.dataset.value!);
-        if (seg.dataset.name === 'executor') { this.fillModels(); this.fillColleagueModels(); this.fillPlannerModels(); }
+        if (seg.dataset.name === 'executor') {
+          this.field<HTMLSelectElement>('model').value = '';
+          this.field<HTMLSelectElement>('effort').value = '';
+          this.fillModels();
+        }
         this.updateNotes();
       }),
     );
@@ -240,11 +272,25 @@ export class TaskBoardPanel {
       const team = this.field<HTMLInputElement>('team').checked;
       this.form.querySelector<HTMLElement>('[data-team-options]')!.hidden = !team;
       this.form.querySelector<HTMLElement>('[data-executor-label]')!.textContent = team ? 'Основной исполнитель' : 'Кому';
+      this.updateTeam();
     });
-    this.field<HTMLSelectElement>('colleagueModel').addEventListener('change', () => this.fillColleagueEfforts());
-    this.field<HTMLSelectElement>('colleagueExecutor').addEventListener('change', () => this.fillColleagueModels());
-    this.field<HTMLSelectElement>('plannerExecutor').addEventListener('change', () => this.fillPlannerModels());
+    this.field<HTMLInputElement>('usePlanner').addEventListener('change', () => this.updateTeam());
+    this.field<HTMLSelectElement>('plannerExecutor').addEventListener('change', () => {
+      this.field<HTMLSelectElement>('plannerModel').value = '';
+      this.field<HTMLSelectElement>('plannerEffort').value = '';
+      this.fillPlannerModels();
+    });
     this.field<HTMLSelectElement>('plannerModel').addEventListener('change', () => this.fillPlannerEfforts());
+    for (const ex of EXECUTORS) {
+      this.field<HTMLInputElement>(`review-${ex}`).addEventListener('change', () => this.updateTeam());
+      this.field<HTMLSelectElement>(`reviewModel-${ex}`).addEventListener('change', () => this.fillReviewEfforts(ex));
+    }
+    this.form.querySelector<HTMLButtonElement>('[data-refresh]')!.addEventListener('click', () => {
+      if (!this.send({ type: 'board.refresh' })) return this.showError('Нет связи с демоном');
+      const button = this.form.querySelector<HTMLButtonElement>('[data-refresh]')!;
+      button.disabled = true;
+      button.textContent = 'Проверяем CLI…';
+    });
     this.form.addEventListener('submit', (e) => {
       e.preventDefault();
       this.submit();
@@ -330,20 +376,24 @@ export class TaskBoardPanel {
     if (current && [...project.options].some((o) => o.value === current)) project.value = current;
     this.field<HTMLInputElement>('customPath').hidden = project.value !== OTHER;
 
-    // Prefer an executor that can actually run.
-    for (const ex of ['claude', 'codex', 'antigravity'] as Executor[]) {
+    // Pick an installed default only once. Later availability changes must not replace the user's choice.
+    for (const ex of EXECUTORS) {
       const b = this.form.querySelector<HTMLButtonElement>(`.seg[data-name="executor"] button[data-value="${ex}"]`)!;
-      b.disabled = !c.executors[ex].available;
+      b.disabled = false;
       b.title = c.executors[ex].note ?? '';
     }
-    const chosen = this.seg('executor') as Executor;
-    if (!c.executors[chosen]?.available) {
-      const other = (['claude', 'codex', 'antigravity'] as Executor[]).find((e) => c.executors[e].available);
-      if (other) this.setSeg('executor', other);
+    if (!this.initialized) {
+      const other = EXECUTORS.find((e) => c.executors[e].available && c.executors[e].models.length);
+      if (other) {
+        this.setSeg('executor', other);
+        this.field<HTMLSelectElement>('plannerExecutor').value = other;
+      }
+      this.initialized = true;
     }
     this.fillModels();
-    this.fillColleagueModels();
+    this.fillReviewModels();
     this.fillPlannerModels();
+    this.renderSetup();
     this.updateNotes();
   }
 
@@ -352,10 +402,7 @@ export class TaskBoardPanel {
     if (!c) return;
     const models = c.executors[this.seg('executor') as Executor]?.models ?? [];
     const select = this.field<HTMLSelectElement>('model');
-    const current = select.value;
-    select.innerHTML = models.map((m) => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('');
-    if (models.some((m) => m.id === current)) select.value = current;
-    else if (this.seg('executor') === 'claude') select.value = models.find((m) => m.id.includes('sonnet'))?.id ?? models[0]?.id ?? '';
+    this.fillModelSelect(select, models);
     this.fillEfforts();
   }
 
@@ -369,35 +416,28 @@ export class TaskBoardPanel {
     // Board updates refill the lists; keep what the user picked if the model still offers it.
     if (current && model?.efforts?.includes(current)) select.value = current;
     select.disabled = !model?.efforts?.length;
+    this.updateTeam();
   }
 
-  private fillColleagueModels(): void {
-    const executor = this.field<HTMLSelectElement>('colleagueExecutor');
-    for (const option of executor.options) option.disabled = !this.config?.executors[option.value as Executor]?.available;
-    if (executor.selectedOptions[0]?.disabled) executor.value = [...executor.options].find((o) => !o.disabled)?.value ?? executor.value;
-    const ex = this.field<HTMLSelectElement>('colleagueExecutor').value as Executor;
-    for (const option of this.field<HTMLSelectElement>('colleagueExecutor').options) {
-      option.disabled = !this.config?.executors[option.value as Executor]?.available;
+  private fillReviewModels(): void {
+    for (const ex of EXECUTORS) {
+      const models = this.config?.executors[ex]?.models ?? [];
+      const select = this.field<HTMLSelectElement>(`reviewModel-${ex}`);
+      this.fillModelSelect(select, models);
+      this.form.querySelector<HTMLElement>(`[data-reviewer="${ex}"] [data-review-status]`)!.textContent = this.config?.executors[ex]?.available && models.length ? 'доступен' : 'недоступен';
+      this.fillReviewEfforts(ex);
     }
-    this.form.querySelector<HTMLElement>('[data-colleague-label]')!.textContent = `Модель ${EXECUTOR[ex]}`;
-    const models = this.config?.executors[ex]?.models ?? [];
-    const select = this.field<HTMLSelectElement>('colleagueModel');
-    const current = select.value;
-    select.innerHTML = models.map((m) => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('');
-    if (models.some((m) => m.id === current)) select.value = current;
-    else if (ex === 'claude') select.value = models.find((m) => m.id.includes('sonnet'))?.id ?? models[0]?.id ?? '';
-    this.fillColleagueEfforts();
   }
 
   private fillPlannerModels(): void {
     const executor = this.field<HTMLSelectElement>('plannerExecutor');
-    for (const option of executor.options) option.disabled = !this.config?.executors[option.value as Executor]?.available;
-    if (executor.selectedOptions[0]?.disabled) executor.value = [...executor.options].find((o) => !o.disabled)?.value ?? executor.value;
+    for (const option of executor.options) {
+      const ex = option.value as Executor;
+      option.textContent = `${EXECUTOR[ex]}${this.config?.executors[ex]?.available ? '' : ' — недоступен'}`;
+    }
     const models = this.config?.executors[executor.value as Executor]?.models ?? [];
     const select = this.field<HTMLSelectElement>('plannerModel');
-    const current = select.value;
-    select.innerHTML = models.map((m) => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('');
-    if (models.some((m) => m.id === current)) select.value = current;
+    this.fillModelSelect(select, models);
     this.fillPlannerEfforts();
   }
 
@@ -409,26 +449,86 @@ export class TaskBoardPanel {
     select.innerHTML = `<option value="">по умолчанию${model?.defaultEffort ? ` (${esc(model.defaultEffort)})` : ''}</option>` + (model?.efforts ?? []).map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join('');
     if (current && model?.efforts?.includes(current)) select.value = current;
     select.disabled = !model?.efforts?.length;
+    this.updateTeam();
   }
 
-  private fillColleagueEfforts(): void {
-    const ex = this.field<HTMLSelectElement>('colleagueExecutor').value as Executor;
-    const model = this.config?.executors[ex]?.models.find((m) => m.id === this.field<HTMLSelectElement>('colleagueModel').value);
-    const select = this.field<HTMLSelectElement>('colleagueEffort');
+  private fillReviewEfforts(ex: Executor): void {
+    const model = this.config?.executors[ex]?.models.find((m) => m.id === this.field<HTMLSelectElement>(`reviewModel-${ex}`).value);
+    const select = this.field<HTMLSelectElement>(`reviewEffort-${ex}`);
     const current = select.value;
     const def = model?.defaultEffort ? ` (${model.defaultEffort})` : '';
     select.innerHTML = `<option value="">по умолчанию${esc(def)}</option>` + (model?.efforts ?? []).map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join('');
     if (current && model?.efforts?.includes(current)) select.value = current;
     select.disabled = !model?.efforts?.length;
+    this.updateTeam();
+  }
+
+  private fillModelSelect(select: HTMLSelectElement, models: ModelOption[]): void {
+    const current = select.value;
+    select.innerHTML = models.map((m) => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('');
+    if (current && !models.some((m) => m.id === current)) select.insertAdjacentHTML('afterbegin', `<option value="${esc(current)}">${esc(current)} — недоступна</option>`);
+    if (current) select.value = current;
+    select.disabled = !models.length;
+  }
+
+  private renderSetup(): void {
+    const container = this.form.querySelector<HTMLElement>('[data-cli-status]')!;
+    // Preserve expanded instructions while refreshed statuses arrive.
+    const open = new Set([...container.querySelectorAll<HTMLDetailsElement>('details[open]')].map((el) => el.dataset.setup));
+    container.innerHTML = EXECUTORS.map((ex) => {
+      const status = this.config?.executors[ex];
+      const ready = status?.available && status.models.length;
+      const setup = SETUP[ex];
+      return `<details data-setup="${ex}" ${open.has(ex) ? 'open' : ''}>
+        <summary>${EXECUTOR[ex]} — ${ready ? 'доступен' : 'недоступен'} · инструкция</summary>
+        ${status?.note ? `<p class="note">${esc(status.note)}</p>` : ''}
+        <p>1. Установите CLI в терминале:</p><pre>${esc(setup.install)}</pre>
+        <p>2. Откройте новый терминал и выполните вход:</p><pre>${esc(setup.login)}</pre>
+        <p>3. Проверьте <code>${ex === 'antigravity' ? 'agy' : ex} --version</code> и обновите доступность.</p>
+        <a href="${setup.url}" target="_blank" rel="noopener noreferrer">Официальная инструкция ${EXECUTOR[ex]}</a>
+        ${ex === 'antigravity' ? '<p class="note">Нужен отдельный agy CLI. Интеграция экспериментальная; установка редактора сама по себе не гарантирует доступность CLI.</p>' : ''}
+      </details>`;
+    }).join('');
+  }
+
+  private selectedTeam(): { planner?: { executor: Executor; model: string; effort?: string }; colleague: { executor: Executor; model: string; effort?: string }[] } {
+    const participant = (executor: Executor, model: string, effort: string) => ({ executor, model, effort: effort || undefined });
+    if (!this.field<HTMLInputElement>('team').checked) return { colleague: [] };
+    return {
+      ...(this.field<HTMLInputElement>('usePlanner').checked ? { planner: participant(this.field<HTMLSelectElement>('plannerExecutor').value as Executor, this.field<HTMLSelectElement>('plannerModel').value, this.field<HTMLSelectElement>('plannerEffort').value) } : {}),
+      colleague: EXECUTORS.filter((ex) => this.field<HTMLInputElement>(`review-${ex}`).checked).map((ex) => participant(ex, this.field<HTMLSelectElement>(`reviewModel-${ex}`).value, this.field<HTMLSelectElement>(`reviewEffort-${ex}`).value)),
+    };
+  }
+
+  private selectionIssue(): string | undefined {
+    if (!this.config) return 'Проверяем доступность агентов…';
+    const team = this.selectedTeam();
+    const selected = [{ executor: this.seg('executor') as Executor, model: this.field<HTMLSelectElement>('model').value }, ...(team.planner ? [team.planner] : []), ...team.colleague];
+    const blocked = selected.filter((p) => !this.config?.executors[p.executor]?.available || !this.config.executors[p.executor].models.some((m) => m.id === p.model));
+    if (!blocked.length) return undefined;
+    return [...new Set(blocked.map((p) => `${EXECUTOR[p.executor]}: ${this.config?.executors[p.executor]?.note ?? 'нет доступной модели'}`))].join('\n') + '\nВыберите доступного исполнителя, отключите недоступный этап или настройте CLI: «Агенты: доступность и установка».';
+  }
+
+  private updateTeam(): void {
+    const team = this.selectedTeam();
+    this.form.querySelector<HTMLElement>('[data-planner-options]')!.hidden = !this.field<HTMLInputElement>('usePlanner').checked;
+    for (const ex of EXECUTORS) this.form.querySelector<HTMLElement>(`[data-reviewer="${ex}"] [data-review-options]`)!.hidden = !this.field<HTMLInputElement>(`review-${ex}`).checked;
+    const stages = [...(team.planner ? [`План: ${EXECUTOR[team.planner.executor]}`] : []), `Выполнение: ${EXECUTOR[this.seg('executor') as Executor]}`, ...team.colleague.map((p) => `Проверка: ${EXECUTOR[p.executor]}`), ...(team.planner || team.colleague.length ? ['Итог исполнителя'] : [])];
+    const collaborative = !!(team.planner || team.colleague.length);
+    this.form.querySelector<HTMLElement>('[data-team-summary]')!.textContent = collaborative ? stages.join(' → ') : 'Дополнительные этапы отключены — будет отправлена обычная задача.';
+    const issue = this.selectionIssue();
+    const note = this.form.querySelector<HTMLElement>('[data-team-issue]')!;
+    note.textContent = issue ?? '';
+    note.hidden = !issue;
+    const submit = this.form.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    submit.disabled = !!this.pending || !!issue;
+    submit.textContent = this.pending ? 'Отправляется…' : collaborative ? 'Отправить команде' : 'Отправить задачу';
   }
 
   private updateNotes(): void {
     const ex = this.seg('executor') as Executor;
     const note = this.form.querySelector<HTMLElement>('[data-note="executor"]')!;
-    // Say why Claude is greyed out even while Codex is selected.
-    const claude = this.config?.executors.claude;
-    const agy = this.config?.executors.antigravity;
-    const text = this.config?.executors[ex]?.note ?? (agy && !agy.available && agy.note ? `Antigravity: ${agy.note}` : claude && !claude.available && claude.note ? `Claude: ${claude.note}` : undefined);
+    const text = this.config?.executors[ex]?.note;
     note.textContent = text ?? '';
     note.hidden = !text;
     this.form.querySelector<HTMLElement>('[data-note="access"]')!.textContent = ACCESS_HINT[ex]?.[this.seg('access') as Access] ?? '';
@@ -443,6 +543,7 @@ export class TaskBoardPanel {
       git.textContent = 'Папка не в Git-репозитории: изменения будет сложнее просмотреть и откатить.';
       git.hidden = false;
     } else git.hidden = true;
+    this.updateTeam();
   }
 
   private submit(): void {
@@ -452,13 +553,15 @@ export class TaskBoardPanel {
     const prompt = this.field<HTMLTextAreaElement>('prompt').value.trim();
     if (!cwd) return this.showError('Выберите папку проекта');
     if (!prompt) return this.showError('Опишите задачу');
+    const issue = this.selectionIssue();
+    if (issue) return this.showError(issue);
     if (this.pending) return;
     const requestId = crypto.randomUUID();
-    const team = this.field<HTMLInputElement>('team').checked;
+    const selection = this.selectedTeam();
+    const team = !!(selection.planner || selection.colleague.length);
     const ok = this.send({
       type: team ? 'team.create' : 'task.create',
-      ...(team ? { colleague: [{ executor: this.field<HTMLSelectElement>('colleagueExecutor').value as Executor, model: this.field<HTMLSelectElement>('colleagueModel').value, effort: this.field<HTMLSelectElement>('colleagueEffort').value || undefined }] } : {}),
-      ...(team ? { planner: { executor: this.field<HTMLSelectElement>('plannerExecutor').value as Executor, model: this.field<HTMLSelectElement>('plannerModel').value, effort: this.field<HTMLSelectElement>('plannerEffort').value || undefined } } : {}),
+      ...(team ? selection : {}),
       requestId,
       task: {
         prompt,
@@ -471,7 +574,7 @@ export class TaskBoardPanel {
     });
     if (!ok) return this.showError('Нет связи с демоном');
     this.pending = { id: requestId, prompt };
-    this.form.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled = true;
+    this.updateTeam();
   }
 
   private renderList(): void {

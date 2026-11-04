@@ -88,6 +88,37 @@ const stub = (created: NewTask[]) => ({
   },
 });
 
+test('planning can run without reviewers; an unavailable unselected provider is irrelevant', () => {
+  const created: NewTask[] = [];
+  const board = stub(created);
+  const coordinator = createTeamCoordinator({ ...board, config: () => ({
+    projects: [], outsideGit: [], executors: {
+      codex: { available: true, models: [{ id: 'codex', label: 'Codex' }] },
+      antigravity: { available: false, models: [], note: 'Установите agy CLI' },
+    },
+  }) }, assert.fail, () => {}, { file: null });
+  const task: NewTask = { prompt: 'x', cwd: 'C:/p', executor: 'codex', model: 'codex', access: 'write' };
+  coordinator.startTeam(task, [], { executor: 'codex', model: 'codex' });
+  for (let i = 0; i < 3; i++) coordinator.continueTeam({ ...created[i], id: String(i + 1), status: 'done', result: 'Ответ', createdAt: 1 } as Task);
+  assert.deepEqual(created.map((t) => t.executor), ['codex', 'codex', 'codex']);
+  assert.deepEqual(created.map((t) => t.access), ['read', 'write', 'write']);
+  assert.equal(coordinator.list()[0].status, 'done');
+  assert.throws(() => coordinator.startTeam(task, []), /планировщика/);
+});
+
+test('unavailable selected agents are rejected before any work, without substitution', () => {
+  const created: NewTask[] = [];
+  const board = stub(created);
+  const coordinator = createTeamCoordinator({ ...board, config: () => ({
+    ...board.config(), executors: { ...board.config().executors, antigravity: { available: false, models: [], note: 'Установите agy CLI' } },
+  }) }, assert.fail, () => {}, { file: null });
+  const task: NewTask = { prompt: 'x', cwd: 'C:/p', executor: 'codex', model: 'codex', access: 'write' };
+  assert.throws(() => coordinator.startTeam(task, [{ executor: 'antigravity', model: 'x' }]), /antigravity: Установите agy/);
+  assert.throws(() => coordinator.startTeam(task, [], { executor: 'antigravity', model: 'x' }), /antigravity: Установите agy/);
+  assert.throws(() => coordinator.startTeam({ ...task, model: 'missing' }, [{ executor: 'claude', model: 'sonnet' }]), /codex: выбранная модель недоступна/);
+  assert.equal(created.length, 0);
+});
+
 test('configured planner, author and reviewer run in order with the selected access', () => {
   const created: NewTask[] = [];
   const base = stub(created);

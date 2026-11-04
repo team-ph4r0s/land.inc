@@ -122,7 +122,7 @@ export function createTeamCoordinator(
     const config = board.config();
     let participants: TeamParticipant[];
     if (Array.isArray(colleague)) {
-      if (!colleague.length) throw new Error('Выберите хотя бы одного коллегу');
+      if (!colleague.length && !planner) throw new Error('Выберите планировщика или хотя бы одного коллегу');
       if (colleague.length > MAX_PARTICIPANTS) throw new Error(`В команде не больше ${MAX_PARTICIPANTS} коллег`);
       participants = colleague.map((p) => ({ executor: p?.executor, model: p?.model, effort: p?.effort }));
     } else {
@@ -133,7 +133,7 @@ export function createTeamCoordinator(
       participants = [{ executor, model, effort: colleague?.effort }];
     }
     // Reject all invalid participants before starting the first real task.
-    for (const participant of [...participants, ...(planner ? [planner] : []), ...(planner ? [{ executor: input.executor, model: input.model, effort: input.effort }] : [])]) {
+    for (const participant of [{ executor: input.executor, model: input.model, effort: input.effort }, ...participants, ...(planner ? [planner] : [])]) {
       const settings = config.executors[participant.executor];
       if (!settings?.available || !settings.models.length) throw new Error(`${participant.executor}: ${settings?.note ?? 'нет доступных моделей'}`);
       const model = settings.models.find((m) => m.id === participant.model);

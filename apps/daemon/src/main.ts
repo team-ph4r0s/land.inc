@@ -13,6 +13,8 @@ import { describeTool, needsUser } from './activity.ts';
 import { TaskBoard } from './tasks.ts';
 import { createTeamCoordinator } from './team.ts';
 import { fakeExecutors } from './fake-executors.ts';
+import { DnsService, FakeDnsBackend } from './dns.ts';
+import { UpdatesService } from './updates.ts';
 
 const args = process.argv.slice(2);
 const port = Number(process.env.LAND_PORT ?? DAEMON_PORT);
@@ -26,6 +28,7 @@ if (!args.includes('--no-real')) {
 }
 // --fake-agents: tasks go to the fake CLIs from test/fakes and nothing is saved, for working on the UI without models.
 const fake = args.includes('--fake-agents');
+const dns = new DnsService(fake ? { backend: new FakeDnsBackend(), file: null } : {});
 if (fake) process.env.FAKE_DELAY_MS ??= '6000';
 const board = new TaskBoard(store, fake ? { executors: fakeExecutors(), file: null } : {});
 const team = createTeamCoordinator(
@@ -36,6 +39,11 @@ const team = createTeamCoordinator(
   },
   { onCollab: (collab) => broadcast({ type: 'collab', collab }), ...(fake ? { file: null } : {}) },
 );
+const updates = new UpdatesService((state) => broadcast({ type: 'updates', state }),
+  () => !dns.changing && !board.list().some((t) => ['starting', 'running', 'cancelling'].includes(t.status)) && !team.list().some((t) => ['running', 'stopping'].includes(t.status)), { fake });
+process.on('message', (message: any) => {
+  if (message?.type === 'office.update.status') updates.set(message.patch);
+});
 
 /**
  * Transcripts are private. The daemon only listens on loopback, but any web page
@@ -65,6 +73,10 @@ const server = createServer((req, res) => {
       }
       res.writeHead(204).end();
     });
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/health') {
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ version: updates.state.current, pid: process.pid }));
     return;
   }
   res.writeHead(200, { 'content-type': 'application/json' });
@@ -124,7 +136,8 @@ wss.on('connection', (ws) => {
   send(ws, store.snapshot());
   send(ws, { type: 'board', config: board.config(), tasks: board.list() });
   send(ws, { type: 'collabs', collabs: team.list() });
-  ws.on('message', (raw) => {
+  send(ws, { type: 'updates', state: updates.state });
+  ws.on('message', async (raw) => {
     // Only the office client (an allowed origin, see verifyClient) can start tasks.
     let msg: ClientMessage;
     try {
@@ -133,7 +146,23 @@ wss.on('connection', (ws) => {
       return send(ws, { type: 'error', message: 'Некорректное сообщение' });
     }
     try {
-      if (msg.type === 'folders.list') {
+      if (updates.busy && ['task.create', 'task.reply', 'team.create'].includes(msg.type)) throw new Error('Офис обновляется. Дождитесь завершения');
+      if (msg.type === 'updates.check') await updates.check();
+      else if (msg.type === 'updates.install') await updates.install(msg.version, msg.sha);
+      else if (msg.type === 'dns.read' || msg.type === 'dns.test' || msg.type === 'dns.apply' || msg.type === 'dns.restore') {
+        if (typeof msg.requestId !== 'string' || msg.requestId.length > 100) throw new Error('Некорректный запрос DNS');
+        try {
+          if (updates.busy && (msg.type === 'dns.apply' || msg.type === 'dns.restore')) throw new Error('Офис обновляется. Дождитесь завершения');
+          if (msg.type === 'dns.apply' && !msg.settings) throw new Error('Не заданы новые настройки DNS');
+          if (msg.type === 'dns.test') send(ws, { type: 'dns.result', requestId: msg.requestId, probes: await dns.test(msg.servers) });
+          else {
+            const state = msg.type === 'dns.read' ? await dns.state() : await dns.change(msg.adapterId, msg.revision, msg.type === 'dns.apply' ? msg.settings : undefined);
+            send(ws, { type: 'dns.result', requestId: msg.requestId, state, message: msg.type === 'dns.apply' ? 'DNS применены и проверены' : msg.type === 'dns.restore' ? 'Прежние настройки DNS восстановлены' : undefined });
+          }
+        } catch (e) { send(ws, { type: 'dns.result', requestId: msg.requestId, error: (e as Error).message }); }
+      } else if (msg.type === 'board.refresh') {
+        send(ws, { type: 'board', config: board.config(true), tasks: board.list() });
+      } else if (msg.type === 'folders.list') {
         try {
           if (msg.path !== undefined && (typeof msg.path !== 'string' || !isAbsolute(msg.path))) throw new Error('Укажите полный путь');
           const path = resolve(msg.path ?? homedir());
@@ -162,7 +191,8 @@ wss.on('connection', (ws) => {
       } else if (msg.type === 'task.cancel') board.cancel(msg.id);
       else if (msg.type === 'team.cancel') team.cancelTeam(msg.id);
     } catch (e) {
-      if ((msg.type === 'task.create' || msg.type === 'team.create' || msg.type === 'task.reply') && msg.requestId)
+      if (msg.type === 'updates.install') updates.set({ phase: 'failed', message: (e as Error).message });
+      else if ((msg.type === 'task.create' || msg.type === 'team.create' || msg.type === 'task.reply') && msg.requestId)
         send(ws, { type: 'task.rejected', requestId: msg.requestId, message: (e as Error).message });
       else send(ws, { type: 'error', message: (e as Error).message });
     }
@@ -188,3 +218,5 @@ if (fake)
 server.listen(port, '127.0.0.1', () => {
   console.log(`[land] демон запущен: ws://127.0.0.1:${port}`);
 });
+setTimeout(() => void updates.check(), 10_000).unref();
+setInterval(() => void updates.check(), 4 * 60 * 60_000).unref();

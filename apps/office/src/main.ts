@@ -9,6 +9,8 @@ import { buildCampus, CAMPUS_BOUNDS } from './campus';
 import { Sidebar } from './ui';
 import { TaskBoardPanel } from './board';
 import { MeetingPanel } from './meeting';
+import { DnsPanel } from './dns';
+import { UpdatePanel } from './updates';
 import './style.css';
 
 const stage = document.getElementById('stage')!;
@@ -89,6 +91,11 @@ const meeting = new MeetingPanel(sidebar.teamPane, (m) => send(m), (id) => {
   sidebar.show('office');
   if (selected !== id) select(id);
 });
+const dns = new DnsPanel(sidebar.dnsPane, (m) => send(m));
+const updatePanel = new UpdatePanel(sidebar.updatesPane, (m) => send(m));
+document.getElementById('office-version')!.addEventListener('click', () => sidebar.show('updates'));
+office.onUpdate = () => sidebar.show('updates');
+let installedVersion: string | undefined;
 const syncBoard = () => {
   board.setAgents(new Set(states.keys()));
   meeting.setAgents(new Set(states.keys()));
@@ -108,6 +115,19 @@ function select(id: string | undefined): void {
 send = connect(
   (m) => {
     switch (m.type) {
+      case 'updates': {
+        if (installedVersion && installedVersion !== m.state.current) { location.reload(); return; }
+        installedVersion = m.state.current;
+        updatePanel.set(m.state);
+        office.setUpdate(m.state);
+        const button = document.getElementById('office-version')!;
+        button.textContent = m.state.available ? `📦 ${m.state.available.version} приехала!` : `v${m.state.current}`;
+        button.classList.toggle('available', !!m.state.available);
+        return;
+      }
+      case 'dns.result':
+        dns.result(m);
+        return;
       case 'board':
         board.setBoard(m.config, m.tasks);
         meeting.setModels(Object.values(m.config.executors).flatMap((e) => e.models));
@@ -168,7 +188,7 @@ send = connect(
     sidebar.scheduleRender(states, logs, selected);
     if (m.type !== 'log') syncBoard();
   },
-  (online) => { sidebar.setOnline(online); if (!online) board.disconnected(); },
+  (online) => { sidebar.setOnline(online); dns.setOnline(online); updatePanel.setOnline(online); if (!online) board.disconnected(); },
 );
 
 app.ticker.add((t) => {

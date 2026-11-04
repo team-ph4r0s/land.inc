@@ -85,7 +85,7 @@ export class MeetingPanel {
 
   private render(): void {
     if (!this.collabs.length) {
-      this.el.innerHTML = `<h3>Переговорка</h3><p class="empty">Здесь появится совместная работа. Отметьте «Совместная работа» в форме задачи и выберите исполнителя, планировщика и проверяющего.</p>`;
+      this.el.innerHTML = `<h3>Переговорка</h3><p class="empty">Здесь появится совместная работа. Выберите основного исполнителя в форме задачи, включите «Совместная работа» и отметьте нужные этапы: планирование и проверяющих.</p>`;
       return;
     }
     this.el.innerHTML = `<h3>Переговорка</h3><div class="tasks">${this.collabs.map((c) => this.card(c)).join('')}</div>`;

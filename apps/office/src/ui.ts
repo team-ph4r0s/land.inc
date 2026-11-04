@@ -14,7 +14,7 @@ const ago = (t: number) => {
   return s < 60 ? `${s} с` : s < 3600 ? `${Math.round(s / 60)} мин` : `${Math.round(s / 3600)} ч`;
 };
 
-export type Tab = 'office' | 'tasks' | 'team';
+export type Tab = 'office' | 'tasks' | 'team' | 'dns' | 'updates';
 
 /** Sidebar with three tabs: the agent roster (with the selected agent's log), the task board and «Переговорка». */
 export class Sidebar {
@@ -30,15 +30,19 @@ export class Sidebar {
   readonly tasksPane: HTMLElement;
   /** Host element for «Переговорка». */
   readonly teamPane: HTMLElement;
+  readonly dnsPane: HTMLElement;
+  readonly updatesPane: HTMLElement;
   private onPick: (id: string) => void;
   private last?: [Map<string, AgentState>, Map<string, LogEntry[]>, string | undefined];
 
   constructor(root: HTMLElement, onPick: (id: string) => void) {
-    root.innerHTML = '<div class="head"></div><div class="pane office"></div><div class="pane tasks" hidden></div><div class="pane team" hidden></div>';
+    root.innerHTML = '<div class="head"></div><div class="pane office"></div><div class="pane tasks" hidden></div><div class="pane team" hidden></div><div class="pane dns" hidden></div><div class="pane updates" hidden></div>';
     this.head = root.querySelector('.head')!;
     this.el = root.querySelector('.pane.office')!;
     this.tasksPane = root.querySelector('.pane.tasks')!;
     this.teamPane = root.querySelector('.pane.team')!;
+    this.dnsPane = root.querySelector('.pane.dns')!;
+    this.updatesPane = root.querySelector('.pane.updates')!;
     this.onPick = onPick;
     this.el.addEventListener('click', (e) => {
       const row = (e.target as HTMLElement).closest<HTMLElement>('[data-id]');
@@ -65,6 +69,9 @@ export class Sidebar {
     this.el.hidden = tab !== 'office';
     this.tasksPane.hidden = tab !== 'tasks';
     this.teamPane.hidden = tab !== 'team';
+    this.dnsPane.hidden = tab !== 'dns';
+    this.updatesPane.hidden = tab !== 'updates';
+    if (tab === 'dns') this.dnsPane.dispatchEvent(new Event('dns-open'));
     this.renderHead();
   }
 
@@ -143,6 +150,7 @@ export class Sidebar {
         <button type="button" data-tab="office" class="${this.tab === 'office' ? 'on' : ''}">Сотрудники</button>
         <button type="button" data-tab="tasks" class="${this.tab === 'tasks' ? 'on' : ''}">Задачи${badge}</button>
         <button type="button" data-tab="team" class="${this.tab === 'team' ? 'on' : ''}">Переговорка${this.meeting ? ` <b>${this.meeting}</b>` : ''}</button>
+        <button type="button" data-tab="dns" class="${this.tab === 'dns' ? 'on' : ''}">DNS</button>
       </nav>`;
   }
 }

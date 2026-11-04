@@ -1,7 +1,9 @@
 {
   "name": "land-inc",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
+  "engines": { "node": ">=24" },
   "workspaces": [
     "apps/*",
     "packages/*"

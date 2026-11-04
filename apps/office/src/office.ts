@@ -1,9 +1,10 @@
-import { Container, Graphics } from 'pixi.js';
-import type { AgentState, Collaboration } from '@land/protocol';
+import { Container, Graphics, Text } from 'pixi.js';
+import type { AgentState, Collaboration, UpdateState } from '@land/protocol';
 import { AgentSprite, type Detail } from './agent';
 import { iso } from './iso';
 import { DESKS, DOOR, HOME, H, W, SPOTS, ZONE_OF, type Desk, type Tile } from './layout';
 import { drawBoard, type Scene } from './scene';
+import { box, depth } from './iso';
 
 const SCREEN = { off: 0x1b2330, think: 0x3b82f6, write: 0x22c55e, wait: 0xf59e0b };
 
@@ -24,6 +25,10 @@ export class Office {
   private scene: Scene;
   onSelect?: (id: string) => void;
   onBoard?: () => void;
+  onUpdate?: () => void;
+  private parcel = new Container();
+  private parcelY = 0;
+  private reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
   private running = -1;
 
   constructor(world: Container, scene: Scene) {
@@ -45,6 +50,32 @@ export class Office {
       world.addChild(fire);
     }
     scene.board.on('pointertap', () => this.onBoard?.());
+    const parcel = new Graphics();
+    box(parcel, 0, 0, 0.9, 0.9, 24, 0xd3a266);
+    box(parcel, 0.38, 0, 0.14, 0.9, 25, 0x7f9f72);
+    box(parcel, 0, 0.38, 0.9, 0.14, 25, 0x7f9f72);
+    this.parcel.addChild(parcel);
+    this.parcel.position.copyFrom(iso(DOOR.x - 2, DOOR.y - 1));
+    this.parcelY = this.parcel.y;
+    this.parcel.zIndex = depth(DOOR.x - 2, DOOR.y - 1) + 1;
+    this.parcel.visible = false;
+    this.parcel.eventMode = 'static';
+    this.parcel.cursor = 'pointer';
+    this.parcel.on('pointertap', () => this.onUpdate?.());
+    this.world.addChild(this.parcel);
+  }
+
+  setUpdate(state: UpdateState): void {
+    this.parcel.visible = !!state.available;
+    const old = this.parcel.getChildByLabel('version');
+    if (old) { this.parcel.removeChild(old); old.destroy(); }
+    if (state.available) {
+      const label = new Text({ text: `↑ ${state.available.version}`, style: { fontFamily: 'system-ui', fontSize: 13, fontWeight: '700', fill: 0x244a35 } });
+      label.label = 'version';
+      label.anchor.set(0.5);
+      label.position.set(0, -35);
+      this.parcel.addChild(label);
+    }
   }
 
   upsert(state: AgentState): void {
@@ -153,6 +184,7 @@ export class Office {
 
   update(dt: number): void {
     this.t += dt;
+    if (this.parcel.visible) this.parcel.y = this.parcelY - (this.reducedMotion.matches ? 0 : Math.sin(this.t * 2) * 3);
     const now = performance.now();
     for (const [id, until] of this.meetings) {
       if (now < until) continue;

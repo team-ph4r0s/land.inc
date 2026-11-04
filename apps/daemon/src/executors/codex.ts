@@ -3,7 +3,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ModelOption, Task } from '@land/protocol';
-import { headCwd, mtime, onPath } from './files.ts';
+import { cliCommand, cliOnPath, headCwd, mtime } from './files.ts';
 import type { Command, Executor, ExecutorStatus, OutputParser, PreparedRun } from './types.ts';
 
 type Rec = Record<string, any>;
@@ -27,11 +27,12 @@ export class CodexExecutor implements Executor {
     this.models = options.models;
   }
 
+  refresh(): void { this.found = undefined; }
+
   command(): Command | undefined {
     if (this.override) return this.override;
     if (this.found === undefined) {
-      const bin = codexBin();
-      this.found = bin ? { command: bin, args: [] } : null;
+      this.found = codexBin() ?? null;
     }
     return this.found ?? undefined;
   }
@@ -133,18 +134,21 @@ function jsonEvents(onAgent: (agentId: string) => void): OutputParser {
   };
 }
 
-function codexBin(): string | undefined {
-  if (process.env.LAND_CODEX_BIN && existsSync(process.env.LAND_CODEX_BIN)) return process.env.LAND_CODEX_BIN;
+function codexBin(): Command | undefined {
+  if (process.env.LAND_CODEX_BIN) {
+    const cmd = cliCommand(process.env.LAND_CODEX_BIN, 'codex', '@openai/codex');
+    if (cmd) return cmd;
+  }
   if (process.platform === 'win32') {
     try {
       const loc = execFileSync('powershell.exe', ['-NoProfile', '-Command', "(Get-AppxPackage -Name 'OpenAI.Codex*' | Select-Object -First 1).InstallLocation"], { encoding: 'utf8', windowsHide: true, timeout: 10_000 }).trim();
       const exe = loc && join(loc, 'app', 'resources', 'codex.exe');
-      if (exe && existsSync(exe)) return exe;
+      if (exe && existsSync(exe)) return { command: exe, args: [] };
     } catch {
       // no Store package
     }
   }
-  return onPath('codex');
+  return cliOnPath('codex', '@openai/codex');
 }
 
 /** Models listed in Codex's local model cache; a cache, not a guarantee of access. */

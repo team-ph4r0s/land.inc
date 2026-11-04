@@ -11,6 +11,22 @@ import { fakeExecutors } from './fake-executors.ts';
 const cwd = process.cwd();
 const newBoard = () => new TaskBoard(new Store(), { executors: fakeExecutors(), file: null });
 
+test('explicit refresh clears cached CLI discovery and checks newly available agents', () => {
+  let installed = false;
+  let refreshes = 0;
+  const executors = fakeExecutors();
+  const executor = executors.find((e) => e.id === 'codex')!;
+  const original = executor.status.bind(executor);
+  executor.status = () => installed ? original() : { available: false, models: [], note: 'Не установлен' };
+  executor.refresh = () => { refreshes++; };
+  const board = new TaskBoard(new Store(), { executors, file: null });
+  assert.equal(board.config().executors.codex.available, false);
+  installed = true;
+  assert.equal(board.config().executors.codex.available, false);
+  assert.equal(board.config(true).executors.codex.available, true);
+  assert.equal(refreshes, 1);
+});
+
 /** Wait until the board reports a task in a final state. */
 function settled(board: TaskBoard, id: string): Promise<Task> {
   return new Promise((resolve, reject) => {

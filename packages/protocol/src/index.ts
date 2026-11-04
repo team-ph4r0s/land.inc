@@ -139,7 +139,57 @@ export interface Collaboration {
   reason?: string;
 }
 
+export interface DnsFamily {
+  mode: 'auto' | 'manual' | 'unknown';
+  servers: string[];
+}
+
+export interface OfficeRelease {
+  version: string;
+  tag: string;
+  sha: string;
+  url: string;
+  notes: string;
+}
+export interface UpdateState {
+  current: string;
+  available?: OfficeRelease;
+  phase: 'idle' | 'checking' | 'available' | 'preparing' | 'switching' | 'done' | 'failed';
+  message: string;
+  managed: boolean;
+  simulated: boolean;
+  checkedAt?: number;
+}
+export interface DnsAdapter {
+  id: string;
+  index: number;
+  name: string;
+  ipv4: DnsFamily;
+  ipv6: DnsFamily;
+  revision: string;
+}
+export interface DnsSettings {
+  ipv4: DnsFamily;
+  ipv6: DnsFamily;
+}
+export interface DnsState {
+  supported: boolean;
+  simulated: boolean;
+  adapters: DnsAdapter[];
+  backups: { id: string; name: string; at: number; settings: DnsSettings }[];
+  note?: string;
+}
+export interface DnsProbe {
+  server: string;
+  host: string;
+  addresses: string[];
+  ms: number;
+  error?: string;
+}
+
 export type ServerMessage =
+  | { type: 'updates'; state: UpdateState }
+  | { type: 'dns.result'; requestId: string; state?: DnsState; probes?: DnsProbe[]; error?: string; message?: string }
   | { type: 'folders'; requestId: string; path?: string; parent?: string; folders?: string[]; error?: string }
   | { type: 'snapshot'; agents: AgentState[]; logs: Record<string, LogEntry[]> }
   | { type: 'upsert'; agent: AgentState }
@@ -154,6 +204,13 @@ export type ServerMessage =
   | { type: 'error'; message: string };
 
 export type ClientMessage =
+  | { type: 'updates.check' }
+  | { type: 'updates.install'; version: string; sha: string }
+  | { type: 'dns.read'; requestId: string }
+  | { type: 'dns.test'; requestId: string; servers: string[] }
+  | { type: 'dns.apply'; requestId: string; adapterId: string; revision: string; settings: DnsSettings }
+  | { type: 'dns.restore'; requestId: string; adapterId: string; revision: string }
+  | { type: 'board.refresh' }
   | { type: 'folders.list'; requestId: string; path?: string }
   | { type: 'task.create'; task: NewTask; requestId?: string }
   | { type: 'team.create'; task: NewTask; requestId?: string; colleague?: { model: string; effort?: string } | { executor: Executor; model: string; effort?: string }[]; planner?: { executor: Executor; model: string; effort?: string } }
