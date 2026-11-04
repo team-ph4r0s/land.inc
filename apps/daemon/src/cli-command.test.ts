@@ -48,7 +48,9 @@ test('Windows PATH search skips unlaunchable entries and finds a later npm insta
     writeFileSync(join(second, 'land-test-cli.cmd'), '@exit /b 1\r\n');
     writeFileSync(join(pkg, 'package.json'), JSON.stringify({ bin: 'cli.js' }));
     writeFileSync(join(pkg, 'cli.js'), '');
-    process.env.PATH = `${first};${second};${oldPath}`;
+    // Search only this fixture and System32 (where.exe), not the hosted runner's
+    // unrelated toolchain directories and network entries.
+    process.env.PATH = `${first};${second};${join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')}`;
     assert.equal(cliCommand(join(first, 'land-test-cli.cmd'), 'land-test-cli', '@test/cli'), undefined);
     assert.deepEqual(cliOnPath('land-test-cli', '@test/cli'), { command: process.execPath, args: [join(pkg, 'cli.js')] });
   } finally {
