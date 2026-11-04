@@ -16,8 +16,8 @@ const TURN: Record<CollabTurn['status'], string> = {
   cancelled: 'отменён',
   skipped: 'пропущен',
 };
-const ROLE: Record<CollabTurn['role'], string> = { author: 'Автор', reviewer: 'Рецензент', finisher: 'Итог' };
-const EXECUTOR = { claude: 'Claude', codex: 'Codex' } as const;
+const ROLE: Record<CollabTurn['role'], string> = { planner: 'Планирование', author: 'Основной исполнитель', reviewer: 'Проверка', finisher: 'Итог' };
+const EXECUTOR = { claude: 'Claude', codex: 'Codex', antigravity: 'Antigravity' } as const;
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => `&${{ '&': 'amp', '<': 'lt', '>': 'gt', '"': 'quot' }[c]};`);
 const base = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p;
@@ -85,7 +85,7 @@ export class MeetingPanel {
 
   private render(): void {
     if (!this.collabs.length) {
-      this.el.innerHTML = `<h3>Переговорка</h3><p class="empty">Здесь появится совместная работа. Отметьте «Совместная работа» в форме задачи — автор сделает задачу, коллега проверит её только на чтение, автор подведёт итог.</p>`;
+      this.el.innerHTML = `<h3>Переговорка</h3><p class="empty">Здесь появится совместная работа. Отметьте «Совместная работа» в форме задачи и выберите исполнителя, планировщика и проверяющего.</p>`;
       return;
     }
     this.el.innerHTML = `<h3>Переговорка</h3><div class="tasks">${this.collabs.map((c) => this.card(c)).join('')}</div>`;
@@ -126,7 +126,7 @@ export class MeetingPanel {
       <div class="turn-head">
         <span class="turn-dot"></span>
         <b>${ROLE[t.role]}</b> · ${EXECUTOR[t.executor]} · ${esc(model)}${t.effort ? ' · ' + esc(t.effort) : ''}
-        <span class="turn-state">${TURN[t.status]}${t.role === 'reviewer' ? ' · только чтение' : ''}</span>
+        <span class="turn-state">${TURN[t.status]}${t.access === 'read' ? ' · только чтение' : ''}</span>
       </div>
       ${t.handoff ? `<details data-key="${key}" ${this.open.has(key) ? 'open' : ''}><summary>Передал дальше</summary><div class="task-result">${esc(t.handoff)}</div></details>` : ''}
       ${show ? `<button type="button" class="link" data-act="show" data-id="${esc(t.agentId!)}">Показать в офисе</button>` : ''}

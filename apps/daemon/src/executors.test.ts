@@ -163,3 +163,106 @@ test('retrying a failed team stop: the old warning goes away, extra clicks wait,
     cleanup(board);
   }
 });
+
+test('replying to a Claude agent resumes its session: same worker, the new access, the old conversation', { timeout: 20_000 }, async () => {
+  const board = newBoard();
+  const first = await run(board, { prompt: 'Запомни слово', cwd, executor: 'claude', model: 'claude-haiku-5-5', access: 'read' });
+  const reply = await settled(board, board.reply(first.id, { prompt: 'Какое слово?', access: 'write' }).id);
+  assert.equal(reply.status, 'done');
+  assert.equal(reply.continues, first.id);
+  assert.equal(reply.agentId, first.agentId); // the same character keeps working
+  const a = args(reply);
+  assert.equal(a.resume, first.agentId);
+  assert.equal(a.session, undefined); // no new session id
+  assert.equal(a.mode, 'acceptEdits');
+});
+
+test('replying to a Codex agent resumes its thread, with the sandbox passed through config', { timeout: 20_000 }, async () => {
+  const board = newBoard();
+  const first = await run(board, { prompt: 'Запомни слово', cwd, executor: 'codex', model: 'gpt-fake', access: 'write' });
+  const thread = first.agentId!.replace('codex:', '');
+  const reply = await settled(board, board.reply(first.id, { prompt: 'Какое слово?', access: 'read', model: 'gpt-fake-2' }).id);
+  assert.equal(reply.status, 'done');
+  assert.equal(reply.agentId, first.agentId);
+  const a = args(reply);
+  assert.deepEqual([a.exec, a.resume, a.sandbox, a.model, a.stdin], ['exec', thread, 'read-only', 'gpt-fake-2', true]);
+  assert.ok(a.configs.includes('approval_policy="never"'));
+});
+
+test('a reply is refused while the agent works, for an unknown session, and twice at once', { timeout: 20_000 }, async () => {
+  const board = newBoard() as any;
+  try {
+    const busy = board.create({ prompt: '[sleep]', cwd, executor: 'claude', model: 'claude-haiku-5-5', access: 'read' });
+    assert.throws(() => board.reply(busy.id, { prompt: 'ну что?', access: 'read' }), /ещё работает/);
+    board.tasks.unshift({ id: 'lost', prompt: 'x', cwd, executor: 'codex', model: 'gpt-fake', access: 'read', status: 'failed', createdAt: 1 });
+    assert.throws(() => board.reply('lost', { prompt: 'привет', access: 'read' }), /Сессия этого агента неизвестна/);
+    assert.throws(() => board.reply('missing', { prompt: 'привет', access: 'read' }), /не найдена/);
+    // Two replies to one finished task: the second would interleave in the same session.
+    const done = await run(board, { prompt: 'ok', cwd, executor: 'claude', model: 'claude-haiku-5-5', access: 'read' });
+    board.reply(done.id, { prompt: '[sleep]', access: 'read' });
+    assert.throws(() => board.reply(done.id, { prompt: 'ещё', access: 'read' }), /уже отвечает/);
+  } finally {
+    cleanup(board);
+  }
+});
+
+test('the finisher of a team continues the author session', { timeout: 30_000 }, async () => {
+  const board = newBoard();
+  const team = createTeamCoordinator(board, (e) => assert.fail(e), () => {}, { file: null });
+  const done: Task[] = [];
+  const finished = new Promise<void>((resolve) =>
+    board.on('task', (t) => {
+      team.continueTeam(t);
+      if (t.status === 'done' || t.status === 'failed') {
+        done.push(t);
+        if (done.length === 3 || t.status === 'failed') resolve();
+      }
+    }),
+  );
+  team.startTeam({ prompt: 'Почини', cwd, executor: 'codex', model: 'gpt-fake', access: 'read' }, [{ executor: 'claude', model: 'claude-haiku-5-5' }]);
+  await finished;
+  assert.equal(done[2].agentId, done[0].agentId);
+  assert.equal(args(done[2]).resume, done[0].agentId!.replace('codex:', ''));
+  assert.equal(done[2].continues, done[0].id);
+  assert.equal(args(done[1]).resume, undefined); // the reviewer starts its own session
+});
+
+test('a reply keeps the model and effort of the task unless it picks new ones', { timeout: 20_000 }, async () => {
+  const board = newBoard();
+  const first = await run(board, { prompt: 'x', cwd, executor: 'claude', model: 'claude-sonnet-5-5', effort: 'high', access: 'read' });
+  const same = await settled(board, board.reply(first.id, { prompt: 'y', access: 'read' }).id);
+  assert.deepEqual([same.model, same.effort, args(same).effort], ['claude-sonnet-5-5', 'high', 'high']);
+  const other = await settled(board, board.reply(same.id, { prompt: 'z', access: 'read', model: 'claude-haiku-5-5' }).id);
+  assert.deepEqual([other.model, other.effort], ['claude-haiku-5-5', undefined]); // a new model starts from its default effort
+});
+
+test('a session whose cancel was not confirmed cannot be resumed', { timeout: 20_000 }, async () => {
+  const board = newBoard() as any;
+  try {
+    board.killTree = (_p: unknown, _sync: boolean, onResult: (e?: string) => void) => onResult('Access is denied');
+    const task = board.create({ prompt: '[sleep]', cwd, executor: 'claude', model: 'claude-haiku-5-5', access: 'read' });
+    await new Promise<void>((r) => board.on('task', (t: Task) => t.status === 'running' && r()));
+    board.cancel(task.id);
+    const failed = settled(board, task.id);
+    board.procs.get(task.id).kill(); // only the CLI dies; its children may live on
+    assert.equal((await failed).orphans, true);
+    assert.throws(() => board.reply(task.id, { prompt: 'ты тут?', access: 'read' }), /не удалось остановить наверняка/);
+  } finally {
+    cleanup(board);
+  }
+});
+
+test('an agent already in the office moves its task tag to the reply', { timeout: 20_000 }, async () => {
+  const store = new Store();
+  const board = new TaskBoard(store, { executors: fakeExecutors(), file: null });
+  const first = await run(board, { prompt: 'x', cwd, executor: 'claude', model: 'claude-haiku-5-5', access: 'read' });
+  // Its transcript put the worker in the office, tagged with the first task.
+  store.update(first.agentId!, { source: 'claude', title: 'x' });
+  const tag = () => (store.snapshot() as any).agents.find((a: any) => a.id === first.agentId).taskId;
+  assert.equal(tag(), first.id);
+  const reply = board.reply(first.id, { prompt: 'y', access: 'read' });
+  assert.equal(tag(), reply.id); // moved right away, before the transcript says anything
+  await settled(board, reply.id);
+  store.update(first.agentId!, { source: 'claude', detail: 'новая запись транскрипта' });
+  assert.equal(tag(), reply.id); // and it stays on the newest task
+});

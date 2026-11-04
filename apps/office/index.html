@@ -15,14 +15,20 @@
       </header>
       <div class="workspace">
         <main class="office-area">
-          <div class="office-heading"><div><span class="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</span><h2>Ваш офис</h2><p>Здесь ваши агенты работают вместе</p></div><div class="view-hint">Перетащите для перемещения · колесо или кнопки для масштаба</div></div>
+          <div class="office-heading"><div><span class="eyebrow">LAND.INC / ГОРОДСКОЙ КАМПУС</span><h2>Место для идей</h2><p>Студия, зелёный двор и жизнь между задачами</p></div><div class="view-hint">Перемещение — перетаскиванием · масштаб — колесом</div></div>
           <div class="scene-frame"><div id="stage"></div><div class="scene-caption"><span class="live-dot"></span> ЖИЗНЬ ОФИСА <span class="caption-separator">/</span> В РЕАЛЬНОМ ВРЕМЕНИ</div>
+            <div class="scene-views" role="group" aria-label="Вид пространства">
+              <button type="button" data-view="office" aria-pressed="true">Офис</button>
+              <button type="button" data-view="campus" aria-pressed="false">Квартал</button>
+              <button type="button" data-view="garden" aria-pressed="false">Сад</button>
+            </div>
+            <div class="scene-legend"><span><i class="legend-studio"></i>Студия · 18 мест</span><span><i class="legend-courtyard"></i>Кафе и площадь</span><span><i class="legend-garden"></i>Зелёный сад</span></div>
             <div class="scene-controls" role="group" aria-label="Масштаб офиса">
               <button type="button" data-zoom="in" aria-label="Приблизить" title="Приблизить">+</button>
               <button type="button" data-zoom="out" aria-label="Отдалить" title="Отдалить">−</button>
               <button type="button" data-zoom="fit" aria-label="Показать весь офис" title="Показать весь офис">⤢</button>
             </div></div>
-          <div class="office-footer"><span>✳</span><div><strong>Всё на своих местах</strong><small>Наблюдайте за работой команды в реальном времени</small></div><span class="footer-end">land.inc &nbsp; / &nbsp; ВАШ ОФИС</span></div>
+          <div class="office-footer"><span>✳</span><div><strong>Работа в своём ритме</strong><small>Агенты работают в студии и выходят во двор на перерыв</small></div><span class="footer-end">СТУДИЯ &nbsp; / &nbsp; ДВОР &nbsp; / &nbsp; САД</span></div>
         </main>
         <aside id="sidebar"></aside>
       </div>

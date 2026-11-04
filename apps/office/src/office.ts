@@ -2,7 +2,7 @@ import { Container, Graphics } from 'pixi.js';
 import type { AgentState, Collaboration } from '@land/protocol';
 import { AgentSprite, type Detail } from './agent';
 import { iso } from './iso';
-import { DESKS, DOOR, HOME, SPOTS, ZONE_OF, type Desk, type Tile } from './layout';
+import { DESKS, DOOR, HOME, H, W, SPOTS, ZONE_OF, type Desk, type Tile } from './layout';
 import { drawBoard, type Scene } from './scene';
 
 const SCREEN = { off: 0x1b2330, think: 0x3b82f6, write: 0x22c55e, wait: 0xf59e0b };
@@ -222,7 +222,11 @@ export class Office {
       if (desk) return a.walkTo(desk.seat);
       return a.walkTo(this.claim(a, SPOTS.meeting));
     }
-    a.walkTo(this.claim(a, SPOTS[zone]));
+    // A break can happen in the cafe or garden; work activities keep their real zones.
+    const spots = zone === 'kitchen' && Math.random() < 0.35
+      ? SPOTS.kitchen.filter((t) => t.y >= H || t.x >= W)
+      : SPOTS[zone];
+    a.walkTo(this.claim(a, spots));
   }
 
   private claim(a: AgentSprite, spots: Tile[]): Tile {

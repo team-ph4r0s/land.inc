@@ -88,6 +88,24 @@ const stub = (created: NewTask[]) => ({
   },
 });
 
+test('configured planner, author and reviewer run in order with the selected access', () => {
+  const created: NewTask[] = [];
+  const base = stub(created);
+  const config = base.config();
+  const coordinator = createTeamCoordinator({ ...base, config: () => ({ ...config, executors: { ...config.executors, antigravity: { available: true, models: [{ id: 'agy', label: 'Agy' }] } } }) }, (e) => assert.fail(e), () => {}, { file: null });
+  const task: NewTask = { prompt: 'Почини', cwd: 'C:/p', executor: 'codex', model: 'codex', access: 'write' };
+  assert.throws(() => coordinator.startTeam(task, [{ executor: 'claude', model: 'sonnet' }], { executor: 'antigravity', model: 'missing' }), /модель недоступна/);
+  assert.equal(created.length, 0);
+  const collab = coordinator.startTeam(task, [{ executor: 'claude', model: 'sonnet' }], { executor: 'antigravity', model: 'agy' });
+  assert.deepEqual(collab.turns.map((t) => [t.role, t.executor, t.access]), [['planner', 'antigravity', 'read'], ['author', 'codex', 'write'], ['reviewer', 'claude', 'read'], ['finisher', 'codex', 'write']]);
+  for (let i = 0; i < 4; i++) coordinator.continueTeam({ ...created[i], id: String(i + 1), result: `## Коллеге\nшаг ${i}`, status: 'done', createdAt: 1 } as Task);
+  assert.match(created[0].prompt, /codex основным исполнителем/);
+  assert.match(created[1].prompt, /большую часть работы по плану/);
+  assert.match(created[1].prompt, /шаг 0/);
+  assert.match(created[2].prompt, /шаг 1/);
+  assert.equal(coordinator.list()[0].status, 'done');
+});
+
 test('a team has at most three colleagues', () => {
   const created: NewTask[] = [];
   const coordinator = createTeamCoordinator(stub(created), (e) => assert.fail(e), () => {}, { file: null });

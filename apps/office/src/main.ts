@@ -5,6 +5,7 @@ import { Office } from './office';
 import { connect } from './net';
 import { iso } from './iso';
 import { W, H } from './layout';
+import { buildCampus, CAMPUS_BOUNDS } from './campus';
 import { Sidebar } from './ui';
 import { TaskBoardPanel } from './board';
 import { MeetingPanel } from './meeting';
@@ -69,6 +70,7 @@ systemDark.addEventListener('change', () => {
 
 const world = new Container({ sortableChildren: true });
 app.stage.addChild(world);
+const campus = buildCampus(world);
 const office = new Office(world, buildScene(world));
 
 const states = new Map<string, AgentState>();
@@ -128,6 +130,9 @@ send = connect(
       case 'error':
         board.showError(m.message);
         return;
+      case 'folders':
+        board.foldersResult(m);
+        break;
       case 'task.accepted':
         board.submissionResult(m.requestId);
         return;
@@ -166,11 +171,15 @@ send = connect(
   (online) => { sidebar.setOnline(online); if (!online) board.disconnected(); },
 );
 
-app.ticker.add((t) => office.update(Math.min(t.deltaMS / 1000, 0.1)));
+app.ticker.add((t) => {
+  const dt = Math.min(t.deltaMS / 1000, 0.1);
+  office.update(dt);
+  campus.update(dt);
+});
 
 // Camera: drag to pan, wheel or buttons to zoom, double-click or ⤢ to fit.
 let zoom = 1;
-const MIN_ZOOM = 0.35;
+const MIN_ZOOM = 0.08;
 const MAX_ZOOM = 3;
 /** Zoom to `next` keeping the point (mx, my) of the stage in place. */
 function zoomAt(next: number, mx: number, my: number): void {
@@ -180,14 +189,23 @@ function zoomAt(next: number, mx: number, my: number): void {
   world.scale.set(zoom);
   office.setZoom(zoom);
 }
+type View = 'office' | 'campus' | 'garden';
+let currentView: View = 'office';
+const VIEWS = {
+  office: { minX: 0, minY: 0, maxX: W, maxY: H + 2 },
+  campus: CAMPUS_BOUNDS,
+  garden: { minX: 23, minY: 0, maxX: 32, maxY: 24 },
+};
 function fit(): void {
   const w = stage.clientWidth;
   const h = stage.clientHeight;
-  const left = iso(0, H + 5).x;
-  const right = iso(W, 0).x;
-  const top = iso(0, 0).y - 110;
-  const bottom = iso(W, H + 5).y + 20;
-  zoom = Math.min(w / (right - left + 60), h / (bottom - top + 40), 1.6);
+  const b = VIEWS[currentView];
+  const left = iso(b.minX, b.maxY).x;
+  const right = iso(b.maxX, b.minY).x;
+  const top = iso(b.minX, b.minY).y - 110;
+  const bottom = iso(b.maxX, b.maxY).y + 20;
+  zoom = Math.min((w - 32) / (right - left + 40), (h - 100) / (bottom - top + 20), 1.6);
+  zoom = Math.max(MIN_ZOOM, zoom);
   world.scale.set(zoom);
   office.setZoom(zoom);
   world.position.set(w / 2 - ((left + right) / 2) * zoom, h / 2 - ((top + bottom) / 2) * zoom);
@@ -198,6 +216,15 @@ function focus(x: number, y: number): void {
 }
 fit();
 new ResizeObserver(fit).observe(stage);
+document.querySelector('.scene-views')?.addEventListener('click', (e) => {
+  const value = (e.target as HTMLElement).closest<HTMLElement>('[data-view]')?.dataset.view;
+  if (value !== 'office' && value !== 'campus' && value !== 'garden') return;
+  currentView = value;
+  document.querySelectorAll('[data-view]').forEach((button) => {
+    button.setAttribute('aria-pressed', String((button as HTMLElement).dataset.view === value));
+  });
+  fit();
+});
 
 let drag: { x: number; y: number; wx: number; wy: number } | undefined;
 app.canvas.addEventListener('pointerdown', (e) => (drag = { x: e.clientX, y: e.clientY, wx: world.x, wy: world.y }));
@@ -206,6 +233,18 @@ window.addEventListener('pointermove', (e) => {
   if (drag) world.position.set(drag.wx + e.clientX - drag.x, drag.wy + e.clientY - drag.y);
 });
 app.canvas.addEventListener('dblclick', fit);
+stage.tabIndex = 0;
+stage.setAttribute('role', 'region');
+stage.setAttribute('aria-label', 'Офис и квартал. Стрелки перемещают камеру, плюс и минус меняют масштаб, 0 возвращает общий вид.');
+stage.addEventListener('keydown', (e) => {
+  const directions: Record<string, [number, number]> = { ArrowLeft: [50, 0], ArrowRight: [-50, 0], ArrowUp: [0, 50], ArrowDown: [0, -50] };
+  const direction = directions[e.key];
+  if (direction) world.position.set(world.x + direction[0], world.y + direction[1]);
+  else if (e.key === '0') fit();
+  else if (e.key === '+' || e.key === '=' || e.key === '-') zoomAt(zoom * (e.key === '-' ? 0.8 : 1.25), stage.clientWidth / 2, stage.clientHeight / 2);
+  else return;
+  e.preventDefault();
+});
 app.canvas.addEventListener(
   'wheel',
   (e) => {

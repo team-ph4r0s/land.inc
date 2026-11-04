@@ -8,7 +8,7 @@ const STATUS: Record<Task['status'], string> = {
   failed: 'ошибка',
   cancelled: 'отменена',
 };
-const EXECUTOR: Record<Executor, string> = { claude: 'Claude', codex: 'Codex' };
+const EXECUTOR: Record<Executor, string> = { claude: 'Claude', codex: 'Codex', antigravity: 'Antigravity' };
 // Claude has no file system sandbox here: only its permission mode, plus your own allow rules from Claude's settings.
 const ACCESS_HINT: Record<Executor, Record<Access, string>> = {
   claude: {
@@ -18,6 +18,10 @@ const ACCESS_HINT: Record<Executor, Record<Access, string>> = {
   codex: {
     read: 'Песочница read-only: читает и отвечает, ничего не меняет.',
     write: 'Песочница workspace-write: правит файлы только в папке проекта. Разрешения не запрашиваются, всё за пределами песочницы отклоняется.',
+  },
+  antigravity: {
+    read: 'Режим plan: настройки и разрешения Antigravity продолжают действовать; отдельная песочница файлов не гарантируется.',
+    write: 'Режим accept-edits: правки могут выполняться без подтверждения; остальные действия зависят от настроек Antigravity.',
   },
 };
 
@@ -41,6 +45,14 @@ export class TaskBoardPanel {
   private error!: HTMLElement;
   private known = new Set<string>();
   private pending?: { id: string; prompt: string };
+  private folderRequest?: string;
+  private folderPath?: string;
+  private folderParent?: string;
+  /**
+   * The reply form under a finished task. The list re-renders on every update, so what
+   * the user typed lives here and is put back each time.
+   */
+  private reply?: { taskId: string; draft: string; access: Access; error?: string; pending?: string };
 
   constructor(el: HTMLElement, send: (m: ClientMessage) => boolean, onShowAgent: (id: string) => void) {
     this.el = el;
@@ -75,6 +87,11 @@ export class TaskBoardPanel {
   }
 
   submissionResult(id: string, error?: string): void {
+    if (this.reply?.pending === id) {
+      // Accepted: the reply is a new task at the top of the list. Refused: keep the text and say why.
+      this.reply = error ? { ...this.reply, pending: undefined, error } : undefined;
+      return this.renderList();
+    }
     if (this.pending?.id !== id) return;
     const prompt = this.field<HTMLTextAreaElement>('prompt');
     if (!error && prompt.value.trim() === this.pending.prompt) prompt.value = '';
@@ -84,7 +101,38 @@ export class TaskBoardPanel {
   }
 
   disconnected(): void {
-    if (this.pending) this.submissionResult(this.pending.id, 'Связь прервалась до подтверждения. Проверьте список задач перед повторной отправкой.');
+    const lost = 'Связь прервалась до подтверждения. Проверьте список задач перед повторной отправкой.';
+    if (this.reply?.pending) this.submissionResult(this.reply.pending, lost);
+    if (this.pending) this.submissionResult(this.pending.id, lost);
+    if (this.folderRequest) { this.folderRequest = undefined; this.folderMessage('Нет связи с демоном'); }
+  }
+
+  foldersResult(result: { requestId: string; path?: string; parent?: string; folders?: string[]; error?: string }): void {
+    if (result.requestId !== this.folderRequest) return;
+    this.folderRequest = undefined;
+    if (result.error || !result.path) return this.folderMessage(result.error ?? 'Не удалось открыть папку');
+    this.folderPath = result.path;
+    this.folderParent = result.parent;
+    this.form.querySelector<HTMLElement>('[data-folder-path]')!.textContent = result.path;
+    this.form.querySelector<HTMLButtonElement>('[data-folder-up]')!.disabled = !result.parent;
+    this.form.querySelector<HTMLButtonElement>('[data-folder-select]')!.disabled = false;
+    const list = this.form.querySelector<HTMLElement>('[data-folder-list]')!;
+    list.innerHTML = result.folders?.length ? result.folders.map((path) => `<button type="button" data-folder="${esc(path)}">📁 ${esc(base(path))}</button>`).join('') : '<p class="note">Нет вложенных папок</p>';
+  }
+
+  private folderMessage(message: string): void {
+    this.form.querySelector<HTMLElement>('[data-folder-list]')!.textContent = message;
+  }
+
+  private browse(path?: string): void {
+    this.folderPath = undefined;
+    this.folderParent = undefined;
+    this.form.querySelector<HTMLButtonElement>('[data-folder-select]')!.disabled = true;
+    this.form.querySelector<HTMLButtonElement>('[data-folder-up]')!.disabled = true;
+    const requestId = crypto.randomUUID();
+    if (!this.send({ type: 'folders.list', requestId, path })) return this.folderMessage('Нет связи с демоном');
+    this.folderRequest = requestId;
+    this.folderMessage('Загрузка…');
   }
 
   get running(): number {
@@ -98,10 +146,18 @@ export class TaskBoardPanel {
           <select name="project"></select>
         </label>
         <input name="customPath" placeholder="C:\\путь\\к\\проекту" hidden />
-        <div class="field">Кому
+        <button type="button" data-folder-open>Обзор папок…</button>
+        <div class="folder-browser" hidden>
+          <div class="folder-browser-head"><button type="button" data-folder-up>↑ На уровень выше</button><button type="button" data-folder-close>Закрыть</button></div>
+          <p class="note" data-folder-path></p>
+          <div class="folder-list" data-folder-list></div>
+          <button type="button" data-folder-select disabled>Выбрать эту папку</button>
+        </div>
+        <div class="field"><span data-executor-label>Кому</span>
           <div class="seg" data-name="executor">
             <button type="button" data-value="claude">Claude</button>
             <button type="button" data-value="codex">Codex</button>
+            <button type="button" data-value="antigravity">Antigravity</button>
           </div>
         </div>
         <p class="note" data-note="executor" hidden></p>
@@ -120,12 +176,21 @@ export class TaskBoardPanel {
         <label>Задача
           <textarea name="prompt" rows="5" placeholder="Что сделать? Например: найди, почему падает сборка, и предложи исправление"></textarea>
         </label>
-        <label class="team-choice"><input type="checkbox" name="team" /> Совместная работа Claude и Codex</label>
-        <div class="row" data-team-options hidden>
+        <label class="team-choice"><input type="checkbox" name="team" /> Совместная работа</label>
+        <div data-team-options hidden>
+          <p class="note">Основной исполнитель и его модель выбираются выше: он выполняет большую часть работы по плану и пишет код, если разрешены правки. Здесь назначьте планирование и проверку.</p>
+          <div class="row">
+          <label>План и назначение <select name="plannerExecutor"><option value="claude">Claude</option><option value="codex">Codex</option><option value="antigravity" selected>Antigravity</option></select></label>
+          <label>Модель <select name="plannerModel"></select></label>
+          <label>Рассуждения <select name="plannerEffort"></select></label>
+          </div>
+          <div class="row">
+          <label>Проверка <select name="colleagueExecutor"><option value="claude">Claude</option><option value="codex" selected>Codex</option><option value="antigravity">Antigravity</option></select></label>
           <label><span data-colleague-label>Модель коллеги</span> <select name="colleagueModel"></select></label>
           <label>Рассуждения <select name="colleagueEffort"></select></label>
+          </div>
+          <p class="note">Четыре последовательных хода: планирование и назначение выбранного исполнителя, выполнение, проверка, итог исполнителя. Планирование и проверка работают с доступом только на чтение; возможности режима зависят от агента и его настроек.</p>
         </div>
-        <p class="note">Три последовательных хода: первый агент выполняет задачу, коллега проверяет её только на чтение и пишет замечания, затем первый завершает работу. Право записи, если выбрано, есть только у первого агента.</p>
         <p class="error" hidden></p>
         <button type="submit" class="primary">Отправить команде</button>
       </form>
@@ -142,7 +207,7 @@ export class TaskBoardPanel {
         const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-value]');
         if (!b || b.disabled) return;
         this.setSeg(seg.dataset.name!, b.dataset.value!);
-        if (seg.dataset.name === 'executor') { this.fillModels(); this.fillColleagueModels(); }
+        if (seg.dataset.name === 'executor') { this.fillModels(); this.fillColleagueModels(); this.fillPlannerModels(); }
         this.updateNotes();
       }),
     );
@@ -150,11 +215,36 @@ export class TaskBoardPanel {
       this.field<HTMLInputElement>('customPath').hidden = this.field<HTMLSelectElement>('project').value !== OTHER;
       this.updateNotes();
     });
+    this.form.querySelector('[data-folder-open]')!.addEventListener('click', () => {
+      this.form.querySelector<HTMLElement>('.folder-browser')!.hidden = false;
+      const selected = this.field<HTMLSelectElement>('project').value;
+      this.browse(selected === OTHER ? this.field<HTMLInputElement>('customPath').value.trim() || undefined : selected || undefined);
+    });
+    this.form.querySelector('[data-folder-close]')!.addEventListener('click', () => { this.form.querySelector<HTMLElement>('.folder-browser')!.hidden = true; this.folderRequest = undefined; });
+    this.form.querySelector('[data-folder-up]')!.addEventListener('click', () => { if (this.folderParent) this.browse(this.folderParent); });
+    this.form.querySelector('[data-folder-list]')!.addEventListener('click', (e) => {
+      const button = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-folder]');
+      if (button?.dataset.folder) this.browse(button.dataset.folder);
+    });
+    this.form.querySelector('[data-folder-select]')!.addEventListener('click', () => {
+      if (!this.folderPath) return;
+      this.field<HTMLSelectElement>('project').value = OTHER;
+      const input = this.field<HTMLInputElement>('customPath');
+      input.value = this.folderPath;
+      input.hidden = false;
+      this.form.querySelector<HTMLElement>('.folder-browser')!.hidden = true;
+      this.updateNotes();
+    });
     this.field<HTMLSelectElement>('model').addEventListener('change', () => this.fillEfforts());
     this.field<HTMLInputElement>('team').addEventListener('change', () => {
-      this.form.querySelector<HTMLElement>('[data-team-options]')!.hidden = !this.field<HTMLInputElement>('team').checked;
+      const team = this.field<HTMLInputElement>('team').checked;
+      this.form.querySelector<HTMLElement>('[data-team-options]')!.hidden = !team;
+      this.form.querySelector<HTMLElement>('[data-executor-label]')!.textContent = team ? 'Основной исполнитель' : 'Кому';
     });
     this.field<HTMLSelectElement>('colleagueModel').addEventListener('change', () => this.fillColleagueEfforts());
+    this.field<HTMLSelectElement>('colleagueExecutor').addEventListener('change', () => this.fillColleagueModels());
+    this.field<HTMLSelectElement>('plannerExecutor').addEventListener('change', () => this.fillPlannerModels());
+    this.field<HTMLSelectElement>('plannerModel').addEventListener('change', () => this.fillPlannerEfforts());
     this.form.addEventListener('submit', (e) => {
       e.preventDefault();
       this.submit();
@@ -164,7 +254,57 @@ export class TaskBoardPanel {
       if (!b) return;
       if (b.dataset.act === 'cancel') this.send({ type: 'task.cancel', id: b.dataset.id! });
       if (b.dataset.act === 'show') this.onShowAgent(b.dataset.id!);
+      if (b.dataset.act === 'reply') {
+        const task = this.tasks.find((t) => t.id === b.dataset.id);
+        this.reply = this.reply?.taskId === b.dataset.id ? undefined : { taskId: b.dataset.id!, draft: '', access: task?.access ?? 'read' };
+        this.renderList();
+        this.list.querySelector<HTMLTextAreaElement>('.reply textarea')?.focus();
+      }
+      if (b.dataset.act === 'reply-access' && this.reply) {
+        this.reply.access = b.dataset.value as Access;
+        this.renderList();
+      }
+      if (b.dataset.act === 'reply-send') this.sendReply();
     });
+    this.list.addEventListener('input', (e) => {
+      const area = e.target as HTMLTextAreaElement;
+      if (this.reply && area.matches('.reply textarea')) this.reply.draft = area.value;
+    });
+    this.list.addEventListener('keydown', (e) => {
+      // Ctrl+Enter sends the reply, like in a chat.
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && (e.target as HTMLElement).matches('.reply textarea')) this.sendReply();
+    });
+  }
+
+  private sendReply(): void {
+    const r = this.reply;
+    if (!r || r.pending) return;
+    const prompt = r.draft.trim();
+    if (!prompt) {
+      r.error = 'Напишите, что ответить агенту';
+      return this.renderList();
+    }
+    const requestId = crypto.randomUUID();
+    if (!this.send({ type: 'task.reply', taskId: r.taskId, prompt, access: r.access, requestId })) {
+      r.error = 'Нет связи с демоном';
+      return this.renderList();
+    }
+    r.pending = requestId;
+    r.error = undefined;
+    this.renderList();
+  }
+
+  /** The reply form: continues the agent's session, so it remembers the task. */
+  private replyForm(t: Task): string {
+    const r = this.reply!;
+    const seg = (value: Access, label: string) =>
+      `<button type="button" data-act="reply-access" data-value="${value}" class="${r.access === value ? 'on' : ''}">${label}</button>`;
+    return `<div class="reply">
+      <textarea rows="3" placeholder="Ответ агенту: он продолжит разговор и помнит задачу. Ctrl+Enter — отправить" ${r.pending ? 'disabled' : ''}>${esc(r.draft)}</textarea>
+      <div class="seg">${seg('read', 'Только чтение')}${seg('write', 'Может править')}</div>
+      ${r.error ? `<p class="error">${esc(r.error)}</p>` : ''}
+      <div class="task-actions"><button type="button" data-act="reply-send" ${r.pending ? 'disabled' : ''}>${r.pending ? 'Отправляется…' : `Отправить ${EXECUTOR[t.executor]}`}</button></div>
+    </div>`;
   }
 
   private field<T extends HTMLElement>(name: string): T {
@@ -191,18 +331,19 @@ export class TaskBoardPanel {
     this.field<HTMLInputElement>('customPath').hidden = project.value !== OTHER;
 
     // Prefer an executor that can actually run.
-    for (const ex of ['claude', 'codex'] as Executor[]) {
+    for (const ex of ['claude', 'codex', 'antigravity'] as Executor[]) {
       const b = this.form.querySelector<HTMLButtonElement>(`.seg[data-name="executor"] button[data-value="${ex}"]`)!;
       b.disabled = !c.executors[ex].available;
       b.title = c.executors[ex].note ?? '';
     }
     const chosen = this.seg('executor') as Executor;
     if (!c.executors[chosen]?.available) {
-      const other = (['claude', 'codex'] as Executor[]).find((e) => c.executors[e].available);
+      const other = (['claude', 'codex', 'antigravity'] as Executor[]).find((e) => c.executors[e].available);
       if (other) this.setSeg('executor', other);
     }
     this.fillModels();
     this.fillColleagueModels();
+    this.fillPlannerModels();
     this.updateNotes();
   }
 
@@ -231,7 +372,13 @@ export class TaskBoardPanel {
   }
 
   private fillColleagueModels(): void {
-    const ex: Executor = this.seg('executor') === 'claude' ? 'codex' : 'claude';
+    const executor = this.field<HTMLSelectElement>('colleagueExecutor');
+    for (const option of executor.options) option.disabled = !this.config?.executors[option.value as Executor]?.available;
+    if (executor.selectedOptions[0]?.disabled) executor.value = [...executor.options].find((o) => !o.disabled)?.value ?? executor.value;
+    const ex = this.field<HTMLSelectElement>('colleagueExecutor').value as Executor;
+    for (const option of this.field<HTMLSelectElement>('colleagueExecutor').options) {
+      option.disabled = !this.config?.executors[option.value as Executor]?.available;
+    }
     this.form.querySelector<HTMLElement>('[data-colleague-label]')!.textContent = `Модель ${EXECUTOR[ex]}`;
     const models = this.config?.executors[ex]?.models ?? [];
     const select = this.field<HTMLSelectElement>('colleagueModel');
@@ -242,8 +389,30 @@ export class TaskBoardPanel {
     this.fillColleagueEfforts();
   }
 
+  private fillPlannerModels(): void {
+    const executor = this.field<HTMLSelectElement>('plannerExecutor');
+    for (const option of executor.options) option.disabled = !this.config?.executors[option.value as Executor]?.available;
+    if (executor.selectedOptions[0]?.disabled) executor.value = [...executor.options].find((o) => !o.disabled)?.value ?? executor.value;
+    const models = this.config?.executors[executor.value as Executor]?.models ?? [];
+    const select = this.field<HTMLSelectElement>('plannerModel');
+    const current = select.value;
+    select.innerHTML = models.map((m) => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('');
+    if (models.some((m) => m.id === current)) select.value = current;
+    this.fillPlannerEfforts();
+  }
+
+  private fillPlannerEfforts(): void {
+    const ex = this.field<HTMLSelectElement>('plannerExecutor').value as Executor;
+    const model = this.config?.executors[ex]?.models.find((m) => m.id === this.field<HTMLSelectElement>('plannerModel').value);
+    const select = this.field<HTMLSelectElement>('plannerEffort');
+    const current = select.value;
+    select.innerHTML = `<option value="">по умолчанию${model?.defaultEffort ? ` (${esc(model.defaultEffort)})` : ''}</option>` + (model?.efforts ?? []).map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join('');
+    if (current && model?.efforts?.includes(current)) select.value = current;
+    select.disabled = !model?.efforts?.length;
+  }
+
   private fillColleagueEfforts(): void {
-    const ex: Executor = this.seg('executor') === 'claude' ? 'codex' : 'claude';
+    const ex = this.field<HTMLSelectElement>('colleagueExecutor').value as Executor;
     const model = this.config?.executors[ex]?.models.find((m) => m.id === this.field<HTMLSelectElement>('colleagueModel').value);
     const select = this.field<HTMLSelectElement>('colleagueEffort');
     const current = select.value;
@@ -258,7 +427,8 @@ export class TaskBoardPanel {
     const note = this.form.querySelector<HTMLElement>('[data-note="executor"]')!;
     // Say why Claude is greyed out even while Codex is selected.
     const claude = this.config?.executors.claude;
-    const text = this.config?.executors[ex]?.note ?? (claude && !claude.available && claude.note ? `Claude: ${claude.note}` : undefined);
+    const agy = this.config?.executors.antigravity;
+    const text = this.config?.executors[ex]?.note ?? (agy && !agy.available && agy.note ? `Antigravity: ${agy.note}` : claude && !claude.available && claude.note ? `Claude: ${claude.note}` : undefined);
     note.textContent = text ?? '';
     note.hidden = !text;
     this.form.querySelector<HTMLElement>('[data-note="access"]')!.textContent = ACCESS_HINT[ex]?.[this.seg('access') as Access] ?? '';
@@ -287,7 +457,8 @@ export class TaskBoardPanel {
     const team = this.field<HTMLInputElement>('team').checked;
     const ok = this.send({
       type: team ? 'team.create' : 'task.create',
-      ...(team ? { colleague: { model: this.field<HTMLSelectElement>('colleagueModel').value, effort: this.field<HTMLSelectElement>('colleagueEffort').value || undefined } } : {}),
+      ...(team ? { colleague: [{ executor: this.field<HTMLSelectElement>('colleagueExecutor').value as Executor, model: this.field<HTMLSelectElement>('colleagueModel').value, effort: this.field<HTMLSelectElement>('colleagueEffort').value || undefined }] } : {}),
+      ...(team ? { planner: { executor: this.field<HTMLSelectElement>('plannerExecutor').value as Executor, model: this.field<HTMLSelectElement>('plannerModel').value, effort: this.field<HTMLSelectElement>('plannerEffort').value || undefined } } : {}),
       requestId,
       task: {
         prompt,
@@ -304,6 +475,18 @@ export class TaskBoardPanel {
   }
 
   private renderList(): void {
+    // Re-rendering replaces the reply box: keep its focus and caret.
+    const area = this.list.querySelector<HTMLTextAreaElement>('.reply textarea');
+    const focus = area && document.activeElement === area ? { start: area.selectionStart, end: area.selectionEnd } : undefined;
+    this.renderTasks();
+    const next = this.list.querySelector<HTMLTextAreaElement>('.reply textarea');
+    if (focus && next) {
+      next.focus();
+      next.setSelectionRange(focus.start, focus.end);
+    }
+  }
+
+  private renderTasks(): void {
     const models = new Map<string, string>();
     for (const ex of Object.values(this.config?.executors ?? {})) for (const m of ex.models) models.set(m.id, m.label);
     if (!this.tasks.length) {
@@ -320,12 +503,14 @@ export class TaskBoardPanel {
             <span class="who">${EXECUTOR[t.executor]} · ${esc(models.get(t.model) ?? t.model)}${t.effort ? ' · ' + esc(t.effort) : ''}</span>
           </div>
           <div class="task-prompt">${esc(t.prompt)}</div>
-          <div class="meta dim">📁 ${esc(base(t.cwd))} · ${t.access === 'write' ? 'может править' : 'только чтение'}${t.outsideGit ? ' · вне Git' : ''} · ${new Date(t.createdAt).toLocaleTimeString()}</div>
+          <div class="meta dim">${t.continues ? '↪ ответ в той же сессии · ' : ''}📁 ${esc(base(t.cwd))} · ${t.access === 'write' ? 'может править' : 'только чтение'}${t.outsideGit ? ' · вне Git' : ''} · ${new Date(t.createdAt).toLocaleTimeString()}</div>
           ${t.result ? `<details><summary>${t.status === 'failed' ? 'Ошибка' : 'Ответ'}</summary><div class="task-result">${esc(t.result)}</div></details>` : ''}
           <div class="task-actions">
             ${show ? `<button type="button" data-act="show" data-id="${esc(t.agentId!)}">Показать в офисе</button>` : ''}
             ${live ? `<button type="button" data-act="cancel" data-id="${esc(t.id)}">${t.status === 'cancelling' ? 'Отменить ещё раз' : 'Отменить'}</button>` : ''}
+            ${!live && t.agentId ? `<button type="button" data-act="reply" data-id="${esc(t.id)}" aria-expanded="${this.reply?.taskId === t.id}">${this.reply?.taskId === t.id ? 'Скрыть ответ' : 'Ответить'}</button>` : ''}
           </div>
+          ${this.reply?.taskId === t.id && !live ? this.replyForm(t) : ''}
         </div>`;
       })
       .join('');

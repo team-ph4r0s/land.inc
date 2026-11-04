@@ -1,10 +1,11 @@
 import type { Activity } from '@land/protocol';
+import { CAMPUS_BOUNDS, CAMPUS_OBSTACLES } from './campus';
 
 /** Office floor plan in tile coordinates. */
 export const W = 24;
 export const H = 18;
 export const DOOR = { x: 11, y: H - 1 };
-export const HOME = { x: 14, y: H + 3 };
+export const HOME = { x: 11, y: 24 };
 
 export interface Tile {
   x: number;
@@ -33,7 +34,7 @@ export const ZONE_OF: Record<Activity, Zone> = {
 const range = (a: number, b: number) => Array.from({ length: b - a + 1 }, (_, i) => a + i);
 
 export const DESKS: Desk[] = [4, 7, 10].flatMap((y) =>
-  [4, 6, 8, 10, 12, 14].map((x) => ({ x, y, seat: { x, y: y + 1 } })),
+  [4, 6, 9, 11, 14, 16].map((x) => ({ x, y, seat: { x, y: y + 1 } })),
 );
 
 /** Tiles occupied by furniture; everything else is walkable. */
@@ -48,10 +49,12 @@ export const PLANTS: Tile[] = [
   { x: 0, y: 0 },
   { x: 16, y: 0 },
   { x: 0, y: 9 },
-  { x: 15, y: 13 },
+  { x: 17, y: 13 },
   { x: 23, y: 7 },
   { x: 23, y: 13 },
 ];
+export const RECEPTION: Tile[] = [{ x: 14, y: 15 }, { x: 15, y: 15 }];
+export const COFFEE_TABLE: Tile[] = [{ x: 4, y: 14 }];
 
 export const SPOTS: Record<Exclude<Zone, 'desk'>, Tile[]> = {
   archive: range(1, 6).map((x) => ({ x, y: 1 })),
@@ -66,16 +69,18 @@ export const SPOTS: Record<Exclude<Zone, 'desk'>, Tile[]> = {
     { x: 22, y: 9 },
     { x: 22, y: 10 },
   ],
-  kitchen: [...range(13, 16).map((y) => ({ x: 1, y })), ...range(3, 5).map((x) => ({ x, y: 15 })), { x: 2, y: 13 }, { x: 2, y: 14 }],
+  kitchen: [...range(13, 16).map((y) => ({ x: 1, y })), ...range(3, 5).map((x) => ({ x, y: 15 })), { x: 2, y: 13 }, { x: 2, y: 14 }, { x: 3, y: 23 }, { x: 5, y: 22 }, { x: 17, y: 21 }, { x: 27, y: 13 }],
 };
 
-const key = (t: Tile) => t.y * W + t.x;
+const STRIDE = CAMPUS_BOUNDS.maxX;
+const key = (t: Tile) => t.y * STRIDE + t.x;
 const blocked = new Set<number>(
-  [...DESKS, ...SHELVES, ...RACKS, ...GLASS, ...KIOSKS, ...MEETING_TABLE, ...COUNTER, ...SOFA, ...PLANTS].map(key),
+  [...DESKS, ...SHELVES, ...RACKS, ...GLASS, ...KIOSKS, ...MEETING_TABLE, ...COUNTER, ...SOFA, ...PLANTS, ...RECEPTION, ...COFFEE_TABLE, ...CAMPUS_OBSTACLES].map(key),
 );
 
 export function walkable(x: number, y: number): boolean {
-  return x >= 0 && y >= 0 && x < W && y < H && !blocked.has(y * W + x);
+  // The road is scenery; agents use the forecourt and the garden paths.
+  return x >= 0 && y >= 0 && x < CAMPUS_BOUNDS.maxX && y < 25 && !blocked.has(key({ x, y }));
 }
 
 /** Shortest 8-directional path (no corner cutting) from a to b, excluding a. */
@@ -89,22 +94,22 @@ export function findPath(a: Tile, b: Tile): Tile[] {
   for (let i = 0; i < queue.length; i++) {
     const cur = queue[i];
     if (cur === goal) break;
-    const cx = cur % W;
-    const cy = Math.floor(cur / W);
+    const cx = cur % STRIDE;
+    const cy = Math.floor(cur / STRIDE);
     for (const [dx, dy] of DIRS) {
       const nx = cx + dx;
       const ny = cy + dy;
-      if (!walkable(nx, ny) && !(nx === b.x && ny === b.y)) continue;
+      if (!walkable(nx, ny)) continue;
       if (dx && dy && (!walkable(cx + dx, cy) || !walkable(cx, cy + dy))) continue;
-      const k = ny * W + nx;
+      const k = ny * STRIDE + nx;
       if (prev.has(k)) continue;
       prev.set(k, cur);
       queue.push(k);
     }
   }
-  if (!prev.has(goal)) return [b];
+  if (!prev.has(goal)) return [];
   const path: Tile[] = [];
-  for (let k = goal; k !== start; k = prev.get(k)!) path.push({ x: k % W, y: Math.floor(k / W) });
+  for (let k = goal; k !== start; k = prev.get(k)!) path.push({ x: k % STRIDE, y: Math.floor(k / STRIDE) });
   return path.reverse();
 }
 

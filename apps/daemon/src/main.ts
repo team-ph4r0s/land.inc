@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage } from 'node:http';
-import { basename } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { readdirSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { DAEMON_PORT, type ClientMessage, type ServerMessage } from '@land/protocol';
 import { Store } from './store.ts';
@@ -131,18 +133,36 @@ wss.on('connection', (ws) => {
       return send(ws, { type: 'error', message: 'Некорректное сообщение' });
     }
     try {
-      if (msg.type === 'task.create') {
+      if (msg.type === 'folders.list') {
+        try {
+          if (msg.path !== undefined && (typeof msg.path !== 'string' || !isAbsolute(msg.path))) throw new Error('Укажите полный путь');
+          const path = resolve(msg.path ?? homedir());
+          const folders = readdirSync(path, { withFileTypes: true }).filter((entry) => {
+            if (entry.isDirectory()) return true;
+            if (!entry.isSymbolicLink()) return false;
+            try { return statSync(join(path, entry.name)).isDirectory(); } catch { return false; }
+          }).map((entry) => join(path, entry.name)).sort((a, b) => a.localeCompare(b));
+          const parent = dirname(path);
+          send(ws, { type: 'folders', requestId: msg.requestId, path, parent: parent === path ? undefined : parent, folders });
+        } catch {
+          send(ws, { type: 'folders', requestId: msg.requestId, error: 'Не удалось открыть папку. Проверьте путь и права доступа.' });
+        }
+      } else if (msg.type === 'task.create') {
         board.create(msg.task);
         if (msg.requestId) send(ws, { type: 'task.accepted', requestId: msg.requestId });
         broadcast({ type: 'board', config: board.config(), tasks: board.list() });
       } else if (msg.type === 'team.create') {
-        team.startTeam(msg.task, msg.colleague);
+        team.startTeam(msg.task, msg.colleague, msg.planner);
+        if (msg.requestId) send(ws, { type: 'task.accepted', requestId: msg.requestId });
+        broadcast({ type: 'board', config: board.config(), tasks: board.list() });
+      } else if (msg.type === 'task.reply') {
+        board.reply(msg.taskId, { prompt: msg.prompt, access: msg.access, model: msg.model, effort: msg.effort });
         if (msg.requestId) send(ws, { type: 'task.accepted', requestId: msg.requestId });
         broadcast({ type: 'board', config: board.config(), tasks: board.list() });
       } else if (msg.type === 'task.cancel') board.cancel(msg.id);
       else if (msg.type === 'team.cancel') team.cancelTeam(msg.id);
     } catch (e) {
-      if ((msg.type === 'task.create' || msg.type === 'team.create') && msg.requestId)
+      if ((msg.type === 'task.create' || msg.type === 'team.create' || msg.type === 'task.reply') && msg.requestId)
         send(ws, { type: 'task.rejected', requestId: msg.requestId, message: (e as Error).message });
       else send(ws, { type: 'error', message: (e as Error).message });
     }

@@ -4,17 +4,18 @@ import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import type { BoardConfig, Executor as ExecutorId, NewTask, Task } from '@land/protocol';
+import type { Access, BoardConfig, Executor as ExecutorId, NewTask, Task } from '@land/protocol';
 import type { Store } from './store.ts';
 import type { Executor, OutputParser } from './executors/types.ts';
 import { ClaudeExecutor } from './executors/claude.ts';
 import { CodexExecutor } from './executors/codex.ts';
+import { AntigravityExecutor } from './executors/antigravity.ts';
 
 const MAX_RUNNING = 4;
 const MAX_PROMPT = 20_000;
 const KEEP_TASKS = 100;
 const CONFIG_TTL_MS = 60_000;
-const EXECUTORS: ExecutorId[] = ['claude', 'codex'];
+const EXECUTORS: ExecutorId[] = ['claude', 'codex', 'antigravity'];
 
 export interface BoardOptions {
   /** The agents tasks can go to; tests pass executors that start fake CLIs. */
@@ -42,6 +43,8 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
   private cancels = new Map<string, { closed: boolean; last?: string; kill?: { error?: string } }>();
   /** Untrimmed answers of recent tasks: a team looks for the colleague section, which is usually at the end. */
   private full = new Map<string, string>();
+  /** Tasks that continue an agent session: task id → the CLI's session id. */
+  private resumes = new Map<string, string>();
   /** Swappable in tests. */
   private killTree = killTree;
   private store: Store;
@@ -49,15 +52,16 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
   constructor(store: Store, options: BoardOptions = {}) {
     super();
     this.store = store;
-    const executors = options.executors ?? [new ClaudeExecutor(), new CodexExecutor()];
+    const executors = options.executors ?? [new ClaudeExecutor(), new CodexExecutor(), new AntigravityExecutor()];
     this.executors = new Map(executors.map((e) => [e.id, e]));
     this.file = options.file === undefined ? join(homedir(), '.land', 'tasks.json') : options.file;
     this.load();
-    // Tag the worker in the office once its transcript shows up.
+    // Tag the worker in the office with its newest task: a reply resumes the same agent,
+    // whose tag must move on from the task it answered.
     store.on('message', (m) => {
-      if (m.type !== 'upsert' || m.agent.taskId) return;
+      if (m.type !== 'upsert') return;
       const task = this.tasks.find((t) => t.agentId === m.agent.id);
-      if (task) store.update(m.agent.id, { source: m.agent.source, taskId: task.id });
+      if (task && m.agent.taskId !== task.id) store.update(m.agent.id, { source: m.agent.source, taskId: task.id });
     });
     process.on('exit', () => {
       for (const p of this.procs.values()) killTree(p, true);
@@ -91,8 +95,33 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
     return config;
   }
 
+  /**
+   * Reply to the agent of a finished task: a new task that continues the same session, so
+   * the agent keeps what it learned. The folder and the agent stay; access, model and effort
+   * are chosen again and checked like any task. The session id never comes from the client.
+   */
+  reply(taskId: string, input: { prompt: string; access: Access; model?: string; effort?: string }): Task {
+    const previous = this.tasks.find((t) => t.id === taskId);
+    if (!previous) throw new Error('Задача не найдена');
+    if (previous.status === 'starting' || previous.status === 'running' || previous.status === 'cancelling')
+      throw new Error('Агент ещё работает над этой задачей — дождитесь ответа');
+    const session = previous.agentId && this.executors.get(previous.executor)?.sessionOf?.(previous.agentId);
+    if (!session) throw new Error('Сессия этого агента неизвестна: продолжить разговор нельзя');
+    // After an unconfirmed cancel, what that run started may still be working in this session.
+    if (this.tasks.some((t) => t.agentId === previous.agentId && t.orphans))
+      throw new Error('Прошлый ход этого агента не удалось остановить наверняка: его процессы могли продолжить работу. Продолжать эту сессию небезопасно — начните новую задачу.');
+    // One conversation at a time per session: two replies at once would interleave in one transcript.
+    if (this.tasks.some((t) => t.agentId === previous.agentId && (t.status === 'starting' || t.status === 'running' || t.status === 'cancelling')))
+      throw new Error('Этот агент уже отвечает на другое сообщение');
+    return this.create(
+      // Model and effort stay as they were unless the reply picks others.
+      { prompt: input.prompt, cwd: previous.cwd, executor: previous.executor, model: input.model || previous.model, effort: input.effort || (input.model ? undefined : previous.effort), access: input.access },
+      { resume: session, continues: previous.id, agentId: previous.agentId },
+    );
+  }
+
   /** Validate and start a task. Throws an Error with a message for the user. */
-  create(input: NewTask): Task {
+  create(input: NewTask, from?: { resume: string; continues: string; agentId?: string }): Task {
     const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
     if (!prompt) throw new Error('Опишите задачу');
     if (prompt.length > MAX_PROMPT) throw new Error(`Задача длиннее ${MAX_PROMPT} символов`);
@@ -127,9 +156,18 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
       outsideGit: !inGit(cwd) || undefined,
       status: 'starting',
       createdAt: Date.now(),
+      ...(from ? { continues: from.continues, agentId: from.agentId } : {}),
     };
+    if (from) this.resumes.set(task.id, from.resume);
     this.tasks.unshift(task);
     this.tasks = this.tasks.slice(0, KEEP_TASKS);
+    // The resumed agent may already be in the office: move its tag to this task now
+    // (after the task is listed, so the tag listener agrees it is the newest one).
+    const office = from?.agentId ? this.store.snapshot() : undefined;
+    if (office?.type === 'snapshot') {
+      const present = office.agents.find((a) => a.id === from!.agentId);
+      if (present) this.store.update(present.id, { source: present.source, taskId: task.id });
+    }
     if (!this.config().projects.includes(cwd)) this.cached = undefined;
     this.run(task);
     return task;
@@ -165,24 +203,32 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
     if (!c || !c.closed || !c.kill) return;
     this.cancels.delete(task.id);
     // The CLI is gone, but if the tree kill failed its children may still be running: do not call that cancelled.
-    if (c.kill.error)
+    if (c.kill.error) {
+      task.orphans = true;
       this.finish(task, 'failed', 'Отмена не подтверждена: CLI завершился, но запущенные им процессы могли продолжить работу. Проверьте их в диспетчере задач.');
-    else this.finish(task, 'cancelled', c.last);
+    } else this.finish(task, 'cancelled', c.last);
   }
 
   private run(task: Task): void {
     const executor = this.executors.get(task.executor)!;
     let child: ChildProcess;
     let output: OutputParser;
+    let stdin: string | undefined;
     try {
       const cmd = executor.command();
       if (!cmd) throw new Error('CLI не найден');
-      const prepared = executor.prepare(task, (agentId) => {
-        task.agentId = agentId;
-        this.changed(task);
-      });
+      const prepared = executor.prepare(
+        task,
+        (agentId) => {
+          if (task.agentId === agentId) return;
+          task.agentId = agentId;
+          this.changed(task);
+        },
+        this.resumes.get(task.id),
+      );
       if (prepared.agentId) task.agentId = prepared.agentId;
       output = prepared.output;
+      stdin = prepared.stdin;
       child = spawn(cmd.command, [...cmd.args, ...prepared.args], {
         cwd: task.cwd,
         windowsHide: true,
@@ -221,7 +267,7 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
     });
     // A CLI that dies before reading its prompt closes stdin; that surfaces through 'close', not as a crash here.
     child.stdin?.on('error', () => {});
-    child.stdin?.end(task.prompt);
+    child.stdin?.end(stdin ?? task.prompt);
   }
 
   private finish(task: Task, status: Task['status'], result?: string): void {
@@ -234,6 +280,7 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
       if (this.full.size > 20) this.full.delete(this.full.keys().next().value!);
     }
     this.outputs.delete(task.id);
+    this.resumes.delete(task.id);
     this.changed(task);
   }
 

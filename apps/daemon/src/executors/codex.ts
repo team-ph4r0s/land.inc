@@ -42,20 +42,22 @@ export class CodexExecutor implements Executor {
     return { available: true, models };
   }
 
-  prepare(task: Task, onAgent: (agentId: string) => void): PreparedRun {
-    const args = [
-      'exec',
-      '--json',
-      '--sandbox', task.access === 'write' ? 'workspace-write' : 'read-only',
-      // Nobody is there to approve: requests outside the sandbox are refused, not asked.
-      '-c', 'approval_policy="never"',
-      '-C', task.cwd,
-      '-m', task.model,
-      '--skip-git-repo-check',
-    ];
+  prepare(task: Task, onAgent: (agentId: string) => void, resume?: string): PreparedRun {
+    const sandbox = task.access === 'write' ? 'workspace-write' : 'read-only';
+    // `exec resume` has no --sandbox or -C: the sandbox goes through config, the folder is the process cwd.
+    const args = resume
+      ? ['exec', 'resume', resume, '--json', '-c', `sandbox_mode="${sandbox}"`]
+      : ['exec', '--json', '--sandbox', sandbox, '-C', task.cwd];
+    // Nobody is there to approve: requests outside the sandbox are refused, not asked.
+    args.push('-c', 'approval_policy="never"', '-m', task.model, '--skip-git-repo-check');
     if (task.effort) args.push('-c', `model_reasoning_effort="${task.effort}"`);
     args.push('-');
-    return { args, output: jsonEvents(onAgent) };
+    return { args, agentId: resume ? `codex:${resume}` : undefined, output: jsonEvents(onAgent) };
+  }
+
+  sessionOf(agentId: string): string | undefined {
+    // Office ids are "codex:<thread uuid>"; the thread id is what `exec resume` takes.
+    return agentId.match(/^codex:([0-9a-f-]{36})$/i)?.[1];
   }
 
   projects(): [string, number][] {

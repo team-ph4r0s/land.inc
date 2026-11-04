@@ -1,7 +1,7 @@
 import { Container, Graphics, Text } from 'pixi.js';
 import { box, depth, diamond, iso, shade, wallPanelX, wallPanelY } from './iso';
 import {
-  COUNTER, DESKS, DOOR, GLASS, H, KIOSKS, MEETING_TABLE, PLANTS, RACKS, SHELVES, SOFA, W,
+  COFFEE_TABLE, COUNTER, DESKS, DOOR, GLASS, H, KIOSKS, MEETING_TABLE, PLANTS, RACKS, RECEPTION, SHELVES, SOFA, W,
   type Desk, type Tile,
 } from './layout';
 
@@ -33,7 +33,8 @@ export function buildScene(world: Container): Scene {
   title.anchor.set(0.5);
   title.position.set(tp.x, tp.y - 79);
   title.skew.set(0, -0.46);
-  board.addChild(title);
+  title.zIndex = board.zIndex + 1;
+  world.addChild(title);
   world.addChild(board);
 
   const add = (t: Tile, draw: (g: Graphics) => void, lift = 0) => {
@@ -52,6 +53,20 @@ export function buildScene(world: Container): Scene {
   for (const t of COUNTER) add(t, (g) => counter(g, t, t.y === 14));
   for (const t of SOFA) add(t, (g) => sofa(g, t));
   for (const t of PLANTS) add(t, (g) => plant(g, t));
+  for (const t of RECEPTION) add(t, (g) => {
+    box(g, t.x, t.y, 1, 0.7, 28, 0x526b60);
+    box(g, t.x - 0.04, t.y - 0.04, 1.08, 0.78, 3, 0xeadcc2, 28);
+    for (let i = 0; i < 5; i++) box(g, t.x + i * 0.2, t.y + 0.69, 0.035, 0.025, 23, 0x94aa92);
+  });
+  for (const t of COFFEE_TABLE) add(t, (g) => {
+    box(g, t.x + 0.1, t.y + 0.1, 0.8, 0.8, 13, 0xb98662);
+    box(g, t.x + 0.2, t.y + 0.2, 0.32, 0.42, 1, 0xf3e9d4, 13);
+  });
+  for (const d of DESKS) add(d.seat, (g) => chair(g, d.seat));
+  for (const x of [19, 20, 21]) {
+    add({ x, y: 8 }, (g) => chair(g, { x, y: 8 }, 0xb78366));
+    add({ x, y: 11 }, (g) => chair(g, { x, y: 11 }, 0xb78366));
+  }
 
   const desks = DESKS.map((d) => {
     const screen = new Graphics();
@@ -68,48 +83,68 @@ export function buildScene(world: Container): Scene {
   return { desks, racks, board };
 }
 
-function floor(): Graphics {
+function floor(): Container {
+  const layer = new Container();
   const g = new Graphics();
-  for (let y = H; y < H + 5; y++) {
-    for (let x = 0; x < W; x++) diamond(g, x, y, 1, 1, y < H + 2 ? 0xa9aaa6 : 0x555e69);
-  }
-  for (let x = 1; x < W; x += 4) diamond(g, x, H + 3.4, 2, 0.12, 0xe7dfc1);
+  layer.addChild(g);
+  // A raised cutaway slab gives the building a clear edge against the city.
+  box(g, 0, 0, W, H, 9, 0xc1b9a8, -9);
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
-      let c = (x + y) % 2 ? 0xded9cc : 0xd8d3c6;
+      let c = (x + y) % 2 ? 0xeadfc9 : 0xe5d8c0;
       if (x >= 17 && y <= 5) c = (x + y) % 2 ? 0xa6afa9 : 0x9da8a1; // server room
       else if (x >= 17 && y >= 7 && y <= 12) c = 0xc3ccc0; // meeting carpet
       else if (x <= 6 && y >= 12) c = (x + y) % 2 ? 0xe0d9c8 : 0xdad3c1; // kitchen
       else if (y <= 1 && x <= 7) c = 0xcac5b5; // archive
-      diamond(g, x, y, 1, 1, c);
+      diamond(g, x + 0.01, y + 0.01, 0.98, 0.98, c);
+      // Narrow timber boards, rather than a checkerboard across the whole room.
+      if (x > 2 && x < 18 && y > 2 && y < 13) {
+        diamond(g, x, y + 0.48, 1, 0.025, 0xcab89a, 0.38);
+      }
     }
   }
-  diamond(g, DOOR.x - 0.5, DOOR.y + 0.15, 2, 0.85, 0x6b4f3a); // doormat
-  g.zIndex = -100000;
-  label(g, 'АРХИВ', 3.5, 2.2);
-  label(g, 'СЕРВЕРНАЯ', 20.5, 2.4);
-  label(g, 'ИНТЕРНЕТ', 2.2, 7.4);
-  label(g, 'ПЛАНЫ', 10.5, 2.2);
-  label(g, 'ПЕРЕГОВОРКА', 20.5, 12.6);
-  label(g, 'КУХНЯ', 4, 13.6);
-  label(g, 'ВХОД', DOOR.x + 0.5, DOOR.y + 0.5);
-  return g;
+  for (const x of [3.6, 8.6, 13.6]) {
+    diamond(g, x, 3.5, 3.8, 8.6, 0x91a99b);
+    diamond(g, x + 0.12, 3.62, 3.56, 8.36, 0xc7d2bf);
+    for (let y = 3.8; y < 12; y += 0.36) diamond(g, x + 0.2, y, 3.4, 0.018, 0x9caf9d, 0.4);
+  }
+  diamond(g, 2.4, 13.2, 4.7, 3.8, 0xcc9e7e);
+  diamond(g, 17.7, 7.4, 5.4, 5, 0x7c9688);
+  diamond(g, DOOR.x - 0.5, DOOR.y + 0.15, 2, 0.85, 0x526b60);
+  diamond(g, 10.5, 13.2, 1.9, 3.3, 0xf4ecd9);
+  layer.zIndex = -100000;
+  label(layer, 'АРХИВ', 3.5, 2.2);
+  label(layer, 'СЕРВЕРНАЯ', 20.5, 2.4);
+  label(layer, 'ИНТЕРНЕТ', 2.2, 7.4);
+  label(layer, 'СТУДИЯ / 18 МЕСТ', 11, 12.7);
+  label(layer, 'ПЕРЕГОВОРКА', 20.5, 12.6);
+  label(layer, 'КОФЕ И ПАУЗА', 4.5, 17.4);
+  label(layer, 'РЕСЕПШН', 15, 16.7);
+  label(layer, 'ВХОД', DOOR.x + 0.5, DOOR.y + 0.5);
+  return layer;
 }
 
-function label(parent: Graphics, text: string, x: number, y: number): void {
+function label(parent: Container, text: string, x: number, y: number): void {
   const t = new Text({ text, style: { fontFamily: 'Inter, system-ui, sans-serif', fontSize: 11, fontWeight: '700', fill: 0x000000, letterSpacing: 2 } });
   const p = iso(x, y);
   t.anchor.set(0.5);
   t.position.set(p.x, p.y);
-  t.alpha = 0.18;
+  t.alpha = 0.38;
   t.skew.set(-0.46, 0.46);
   parent.addChild(t);
 }
 
-function walls(): Graphics {
+function walls(): Container {
+  const layer = new Container();
   const g = new Graphics();
-  wallPanelX(g, 0, W, 0, WALL_H, 0xedeae1);
-  wallPanelY(g, 0, H, 0, WALL_H, 0xe4e1d7);
+  layer.addChild(g);
+  wallPanelX(g, 0, W, 0, WALL_H, 0xf5f0e3);
+  wallPanelY(g, 0, H, 0, WALL_H, 0xe7e8db);
+  wallPanelX(g, 17.5, W, 0, WALL_H, 0x435d56);
+  // Timber acoustic wall in the archive, with a continuous picture rail.
+  wallPanelX(g, 0.3, 7.3, 8, 89, 0xc29b73);
+  for (let x = 0.4; x < 7.3; x += 0.23) wallPanelX(g, x, x + 0.035, 8, 89, 0x9c7653);
+  wallPanelY(g, 0, H, 84, 87, 0xc5ba9f);
   wallPanelX(g, 0, W, WALL_H, WALL_H + 6, 0xfaf6f0);
   wallPanelY(g, 0, H, WALL_H, WALL_H + 6, 0xf3ede4);
   wallPanelX(g, 0, W, 0, 6, 0xb9a98f); // skirting
@@ -121,9 +156,15 @@ function walls(): Graphics {
     wallPanelX(g, x0, x1, h, h + 2.5, c);
   // Windows over the internet corner and the kitchen
   for (const [y0, y1] of [[3.6, 6.4], [12.6, 16.4]] as const) {
-    wallPanelY(g, y0, y1, 30, 80, 0x8b9bb0);
-    wallPanelY(g, y0 + 0.1, y1 - 0.1, 33, 77, 0xcadad1);
+    wallPanelY(g, y0, y1, 24, 82, 0x526b60);
+    wallPanelY(g, y0 + 0.1, y1 - 0.1, 27, 79, 0xb5d0cd);
+    wallPanelY(g, y0 + 0.15, y1 - 0.15, 28, 44, 0xcde0ce);
     wallPanelY(g, (y0 + y1) / 2 - 0.04, (y0 + y1) / 2 + 0.04, 33, 77, 0x8b9bb0);
+  }
+  // Ceiling lights are represented on the rear wall to keep people unobscured.
+  for (const x of [8.3, 12.7, 16.8]) {
+    wallPanelX(g, x, x + 0.6, 82, 86, 0xc3a574);
+    wallPanelX(g, x + 0.04, x + 0.56, 80, 82, 0xffedbc);
   }
   // Company sign
   wallPanelX(g, 13.4, 16.2, 52, 76, 0x4c584c);
@@ -132,9 +173,9 @@ function walls(): Graphics {
   sign.anchor.set(0.5);
   sign.position.set(s.x, s.y - 64);
   sign.skew.set(0, 0.46);
-  g.addChild(sign);
-  g.zIndex = -90000;
-  return g;
+  layer.addChild(sign);
+  layer.zIndex = -90000;
+  return layer;
 }
 
 /** Cork board with one sticky note per running task (up to eight). */
@@ -153,12 +194,26 @@ export function drawBoard(g: Graphics, running: number): void {
 }
 
 function deskBody(g: Graphics, d: Tile): void {
-  box(g, d.x + 0.08, d.y + 0.12, 0.84, 0.76, 20, 0xc89f72);
+  // Slender legs and a floating oak surface replace solid storage cubes.
+  for (const [dx, dy] of [[0.12, 0.16], [0.82, 0.16], [0.12, 0.8], [0.82, 0.8]])
+    box(g, d.x + dx, d.y + dy, 0.06, 0.06, 20, 0x52605a);
+  box(g, d.x + 0.04, d.y + 0.08, 0.94, 0.86, 3, 0xd8b58a, 20);
+  box(g, d.x + 0.08, d.y + 0.15, 0.24, 0.58, 14, 0xe8e1cf, 3);
   const s = iso(d.x + 0.5, d.y + 0.5);
   g.poly([s.x - 15, s.y - 46, s.x + 11, s.y - 33, s.x + 11, s.y - 17, s.x - 15, s.y - 30]).fill(0x2a2f3a); // monitor frame
   g.rect(s.x - 3, s.y - 24, 4, 6).fill(0x2a2f3a);
   g.poly([s.x + 2, s.y - 18, s.x + 14, s.y - 12, s.x + 8, s.y - 9, s.x - 4, s.y - 15]).fill(0x3a3f4a); // keyboard
   g.circle(s.x + 18, s.y - 22, 3).fill(0xf5f5f5); // mug
+  g.circle(s.x + 18, s.y - 23, 1.8).fill(0x98694d);
+  g.moveTo(s.x + 11, s.y - 40).lineTo(s.x + 18, s.y - 51).lineTo(s.x + 23, s.y - 49).stroke({ width: 2, color: 0x53645c });
+}
+
+function chair(g: Graphics, t: Tile, color = 0x5b756b): void {
+  const p = iso(t.x + 0.5, t.y + 0.5);
+  g.ellipse(p.x, p.y + 2, 12, 5).fill({ color: 0x33443b, alpha: 0.12 });
+  g.moveTo(p.x, p.y).lineTo(p.x, p.y - 10).stroke({ width: 2, color: 0x53605a });
+  box(g, t.x + 0.2, t.y + 0.2, 0.58, 0.58, 4, color, 10);
+  box(g, t.x + 0.2, t.y + 0.7, 0.58, 0.12, 16, shade(color, 0.9), 10);
 }
 
 function shelf(g: Graphics, t: Tile): void {
@@ -184,6 +239,8 @@ function glass(g: Graphics, t: Tile): void {
   const b = iso(t.x + 0.5, t.y + 1);
   g.poly([a.x, a.y, b.x, b.y, b.x, b.y - 70, a.x, a.y - 70]).fill({ color: 0xcadad1, alpha: 0.35 });
   g.moveTo(a.x, a.y - 70).lineTo(b.x, b.y - 70).stroke({ width: 2, color: 0x8b9bb0 });
+  g.moveTo(a.x, a.y).lineTo(a.x, a.y - 70).stroke({ width: 1.5, color: 0x526b60 });
+  g.moveTo(a.x, a.y - 30).lineTo(b.x, b.y - 30).stroke({ width: 5, color: 0xe6ede2, alpha: 0.5 });
 }
 
 function kiosk(g: Graphics, t: Tile): void {
@@ -204,9 +261,11 @@ function counter(g: Graphics, t: Tile, coffee: boolean): void {
 }
 
 function sofa(g: Graphics, t: Tile): void {
-  const c = 0x818f7c;
+  const c = 0xd5aa85;
   box(g, t.x, t.y + 0.15, 1, 0.8, 12, c);
   box(g, t.x, t.y + 0.7, 1, 0.25, 26, shade(c, 0.9));
+  box(g, t.x + 0.12, t.y + 0.25, 0.76, 0.4, 3, 0xe1b995, 12);
+  box(g, t.x + 0.15, t.y + 0.61, 0.3, 0.12, 10, 0x778f7d, 15);
 }
 
 function plant(g: Graphics, t: Tile): void {

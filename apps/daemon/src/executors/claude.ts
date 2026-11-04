@@ -50,19 +50,24 @@ export class ClaudeExecutor implements Executor {
     return { available: true, models: CLAUDE_MODELS };
   }
 
-  prepare(task: Task): PreparedRun {
-    // A known session id lets the office link the task to its worker right away.
-    const session = randomUUID();
+  prepare(task: Task, _onAgent: (agentId: string) => void, resume?: string): PreparedRun {
+    // A known session id lets the office link the task to its worker right away. Resuming keeps
+    // the same id (Claude makes a new one only with --fork-session), so the same worker continues.
+    const session = resume ?? randomUUID();
     const args = [
       '-p',
       '--model', task.model,
       // Headless runs cannot ask: read-only work plans, write work may edit files; anything else is denied.
       '--permission-mode', task.access === 'write' ? 'acceptEdits' : 'plan',
-      '--session-id', session,
-      '-n', `Доска: ${clip(task.prompt, 40)}`,
+      ...(resume ? ['--resume', resume] : ['--session-id', session, '-n', `Доска: ${clip(task.prompt, 40)}`]),
     ];
     if (task.effort) args.push('--effort', task.effort);
     return { args, agentId: session, output: printOutput() };
+  }
+
+  sessionOf(agentId: string): string | undefined {
+    // Claude's office agents are its session ids (subagents carry "session:agent" and cannot be resumed).
+    return /^[0-9a-f-]{36}$/i.test(agentId) ? agentId : undefined;
   }
 
   projects(): [string, number][] {

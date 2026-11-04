@@ -136,8 +136,24 @@ body { overflow: hidden; }
 .view-hint { color: var(--faint); font-size: 11px; padding-bottom: 2px; }
 .scene-frame { position: relative; flex: 1; min-height: 0; overflow: hidden; border: 1px solid var(--line-2); border-radius: 16px; background: var(--scene); box-shadow: 0 3px 12px var(--shadow); }
 #stage { width: 100%; height: 100%; }
-#stage canvas { display: block; cursor: grab; }
+#stage canvas { display: block; cursor: grab; touch-action: none; }
 #stage canvas:active { cursor: grabbing; }
+.scene-views { position: absolute; top: 57px; left: 18px; display: flex; padding: 4px; gap: 3px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--panel); box-shadow: 0 2px 6px var(--shadow); }
+.scene-views button { border: 0; border-radius: 6px; padding: 7px 13px; background: transparent; color: var(--muted); font: inherit; font-size: 11px; cursor: pointer; }
+.scene-views button[aria-pressed='true'] { background: var(--accent-soft); color: var(--accent-ink); font-weight: 700; }
+.scene-views button:hover { background: var(--surface-3); }
+.scene-legend { position: absolute; bottom: 19px; left: 18px; display: flex; flex-wrap: wrap; gap: 12px; max-width: calc(100% - 80px); padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--panel) 92%, transparent); color: var(--muted); font-size: 10px; pointer-events: none; }
+.scene-legend span { display: flex; align-items: center; gap: 5px; }
+.scene-legend i { width: 7px; height: 7px; border-radius: 2px; }
+.legend-studio { background: #91a99b; }
+.legend-courtyard { background: #bf9877; }
+.legend-garden { background: #7f9a70; }
+#stage:focus-visible { outline: 3px solid var(--focus); outline-offset: -4px; }
+@media (max-width: 600px) {
+  .scene-legend { font-size: 9px; gap: 6px; left: 10px; bottom: 10px; }
+  .scene-caption { left: 10px; }
+  .scene-views { left: 10px; }
+}
 .scene-caption { position: absolute; left: 18px; top: 17px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--panel) 88%, transparent); color: var(--muted); font-size: 9px; font-weight: 800; letter-spacing: .08em; pointer-events: none; }
 .live-dot { display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%; background: var(--accent); }
 .caption-separator { margin: 0 5px; color: var(--faint); }
@@ -229,6 +245,11 @@ code { background: var(--surface-3); padding: 1px 5px; border-radius: 4px; }
 .task-actions button:disabled { opacity: 0.55; cursor: default; }
 button.link { background: none; border: 0; padding: 0; margin-top: 3px; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; text-decoration: underline; }
 
+/* Reply to an agent under its task card. */
+.reply { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
+.reply textarea { width: 100%; resize: vertical; min-height: 64px; padding: 7px 9px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--field); color: var(--text); font: inherit; font-size: 13px; }
+.reply textarea:focus { outline: 2px solid var(--focus); border-color: transparent; }
+
 /* «Переговорка»: turns of a collaboration as a vertical stepper. */
 .turns { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .turn { position: relative; padding: 6px 8px 6px 22px; border: 1px solid var(--line); border-radius: 7px; font-size: 12px; }
@@ -260,3 +281,9 @@ button.link { background: none; border: 0; padding: 0; margin-top: 3px; color: v
   #sidebar { width: 100%; height: auto; min-height: 300px; overflow: visible; }
   .footer-end { display: none; }
 }
+.folder-browser { border: 1px solid #c9b8a0; border-radius: 8px; padding: 10px; }
+.folder-browser[hidden] { display: none; }
+.folder-browser-head { display: flex; gap: 8px; justify-content: space-between; }
+.folder-list { display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow: auto; margin: 8px 0; }
+.folder-list button { text-align: left; }
+[data-folder-path] { overflow-wrap: anywhere; }

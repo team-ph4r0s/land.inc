@@ -50,7 +50,7 @@ export interface LogEntry {
   text: string;
 }
 
-export type Executor = 'claude' | 'codex';
+export type Executor = 'claude' | 'codex' | 'antigravity';
 
 /** read: may look but not change anything; write: may edit files inside the project folder. */
 export type Access = 'read' | 'write';
@@ -89,6 +89,10 @@ export interface Task {
   agentId?: string;
   /** Final answer, or the error that stopped the run (trimmed). */
   result?: string;
+  /** This task continues an earlier one in the same agent session (a reply to the agent). */
+  continues?: string;
+  /** A cancel was not confirmed: processes this run started may still be at work in its session. */
+  orphans?: boolean;
 }
 
 export interface NewTask {
@@ -101,7 +105,7 @@ export interface NewTask {
 }
 
 /** author does the task, reviewers check it read-only, the finisher (the author again) wraps up. */
-export type TurnRole = 'author' | 'reviewer' | 'finisher';
+export type TurnRole = 'planner' | 'author' | 'reviewer' | 'finisher';
 export type TurnStatus = 'waiting' | 'running' | 'done' | 'failed' | 'cancelled' | 'skipped';
 
 export interface CollabTurn {
@@ -136,6 +140,7 @@ export interface Collaboration {
 }
 
 export type ServerMessage =
+  | { type: 'folders'; requestId: string; path?: string; parent?: string; folders?: string[]; error?: string }
   | { type: 'snapshot'; agents: AgentState[]; logs: Record<string, LogEntry[]> }
   | { type: 'upsert'; agent: AgentState }
   | { type: 'remove'; id: string }
@@ -149,11 +154,17 @@ export type ServerMessage =
   | { type: 'error'; message: string };
 
 export type ClientMessage =
+  | { type: 'folders.list'; requestId: string; path?: string }
   | { type: 'task.create'; task: NewTask; requestId?: string }
-  | { type: 'team.create'; task: NewTask; requestId?: string; colleague?: { model: string; effort?: string } }
+  | { type: 'team.create'; task: NewTask; requestId?: string; colleague?: { model: string; effort?: string } | { executor: Executor; model: string; effort?: string }[]; planner?: { executor: Executor; model: string; effort?: string } }
   | { type: 'task.cancel'; id: string }
   /** Stop a collaboration: the running turn is cancelled and no further turn starts. */
-  | { type: 'team.cancel'; id: string };
+  | { type: 'team.cancel'; id: string }
+  /**
+   * Reply to the agent of a finished task: it continues in the same session, with what it
+   * already knows. Only the task id is sent; the daemon finds the session itself.
+   */
+  | { type: 'task.reply'; taskId: string; prompt: string; access: Access; model?: string; effort?: string; requestId?: string };
 
 export const DAEMON_PORT = 4317;
 

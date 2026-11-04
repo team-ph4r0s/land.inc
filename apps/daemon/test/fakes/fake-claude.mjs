@@ -36,7 +36,7 @@ function answer() {
   }
   const flag = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
   console.log(`fake claude answer
-ARGS ${JSON.stringify({ model: flag('--model'), mode: flag('--permission-mode'), effort: flag('--effort'), session: flag('--session-id'), print: args.includes('-p') })}
+ARGS ${JSON.stringify({ model: flag('--model'), mode: flag('--permission-mode'), effort: flag('--effort'), session: flag('--session-id'), resume: flag('--resume'), print: args.includes('-p') })}
 PROMPT_CHARS ${prompt.length}
 
 ## Коллеге

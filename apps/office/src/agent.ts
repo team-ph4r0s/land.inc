@@ -2,7 +2,7 @@ import { Container, Graphics, Text } from 'pixi.js';
 import { describeModel, type Activity, type AgentState } from '@land/protocol';
 import { drawCharacter, KIND_SCALE, type Look } from './character';
 import { depth, iso } from './iso';
-import { DOOR, H, findPath, type Tile } from './layout';
+import { findPath, type Tile } from './layout';
 
 const SPEED = 2.6; // tiles per second
 const SKIN = [0xf1c27d, 0xe0ac69, 0xc68642, 0x8d5524, 0xffdbac];
@@ -163,7 +163,7 @@ export class AgentSprite {
     if (this.target && this.target.x === tile.x && this.target.y === tile.y) return;
     this.target = tile;
     const from = { x: Math.round(this.pos.x - 0.5), y: Math.round(this.pos.y - 0.5) };
-    const route = tile.y >= H ? [...findPath(from, DOOR), { x: DOOR.x, y: H }, tile] : findPath(from, tile);
+    const route = findPath(from, tile);
     this.path = route.map((p) => ({ x: p.x + 0.5, y: p.y + 0.5 }));
   }
 

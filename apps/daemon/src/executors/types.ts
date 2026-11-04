@@ -32,6 +32,8 @@ export interface OutputParser {
 
 export interface PreparedRun {
   args: string[];
+  /** Serialized input when the CLI expects a protocol rather than plain text. */
+  stdin?: string;
   /** Known before the start when the CLI accepts a session id (Claude). */
   agentId?: string;
   output: OutputParser;
@@ -46,8 +48,13 @@ export interface Executor {
   readonly id: ExecutorId;
   status(): ExecutorStatus;
   command(): Command | undefined;
-  /** `onAgent` reports an agent id learned from the output (Codex prints its thread id). */
-  prepare(task: Task, onAgent: (agentId: string) => void): PreparedRun;
+  /**
+   * `onAgent` reports an agent id learned from the output (Codex prints its thread id).
+   * With `resume`, the run continues that agent session instead of starting a new one.
+   */
+  prepare(task: Task, onAgent: (agentId: string) => void, resume?: string): PreparedRun;
+  /** The CLI's own session id for an office agent id, if this executor can resume it. */
+  sessionOf?(agentId: string): string | undefined;
   /** Folders this agent worked in recently, with the time of last use. */
   projects?(): [string, number][];
 }

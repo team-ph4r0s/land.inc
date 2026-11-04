@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import type { Collaboration, CollabTurn, Executor, NewTask, Task } from '@land/protocol';
+import type { BoardConfig, Collaboration, CollabTurn, Executor, NewTask, Task } from '@land/protocol';
 import { readRecoverable, writeAtomic, type TaskBoard } from './tasks.ts';
 
 /** A colleague works in the task's project with its own model. */
@@ -46,7 +46,7 @@ export interface TeamOptions {
 }
 
 export function createTeamCoordinator(
-  board: Pick<TaskBoard, 'config' | 'create'> & Partial<Pick<TaskBoard, 'annotate' | 'fullResult' | 'cancel'>>,
+  board: Pick<TaskBoard, 'create'> & { config(): Omit<BoardConfig, 'executors'> & { executors: Partial<BoardConfig['executors']> } } & Partial<Pick<TaskBoard, 'annotate' | 'fullResult' | 'cancel' | 'reply'>>,
   onError: (message: string) => void,
   onHandoff: (task: Task, recipient: string) => void = () => {},
   options: TeamOptions = {},
@@ -114,8 +114,8 @@ export function createTeamCoordinator(
     save();
   }
 
-  function startTeam(input: NewTask, colleague?: LegacyColleague | TeamParticipant[]): Collaboration {
-    if (!input || (input.executor !== 'claude' && input.executor !== 'codex')) throw new Error('Неизвестный исполнитель');
+  function startTeam(input: NewTask, colleague?: LegacyColleague | TeamParticipant[], planner?: TeamParticipant): Collaboration {
+    if (!input || !['claude', 'codex', 'antigravity'].includes(input.executor)) throw new Error('Неизвестный исполнитель');
     if (input.access !== 'read' && input.access !== 'write') throw new Error('Неизвестный режим доступа');
     if (typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > MAX_TASK)
       throw new Error(`Совместная задача должна быть не длиннее ${MAX_TASK} символов`);
@@ -133,14 +133,17 @@ export function createTeamCoordinator(
       participants = [{ executor, model, effort: colleague?.effort }];
     }
     // Reject all invalid participants before starting the first real task.
-    for (const participant of participants) {
+    for (const participant of [...participants, ...(planner ? [planner] : []), ...(planner ? [{ executor: input.executor, model: input.model, effort: input.effort }] : [])]) {
       const settings = config.executors[participant.executor];
       if (!settings?.available || !settings.models.length) throw new Error(`${participant.executor}: ${settings?.note ?? 'нет доступных моделей'}`);
       const model = settings.models.find((m) => m.id === participant.model);
       if (!model) throw new Error(`${participant.executor}: выбранная модель недоступна`);
       if (participant.effort && !model.efforts?.includes(participant.effort)) throw new Error(`${participant.executor}: такой уровень рассуждений модель не поддерживает`);
     }
-    const task = board.create({ ...input, prompt: `${input.prompt}\n\nРаботаешь в команде. ${ASK_FOR_HANDOFF}` });
+    const plannerInstruction = `Составь план решения задачи. Назначь ${input.executor} основным исполнителем: он выполняет большую часть работы по плану и пишет код, если это разрешено. Назначь проверку ${participants.map((p) => p.executor).join(', ')}. Укажи конкретные шаги и критерии проверки. Не меняй файлы. ${ASK_FOR_HANDOFF}`;
+    const task = board.create(planner
+      ? { ...input, ...planner, access: 'read', prompt: `${input.prompt}\n\n${plannerInstruction}` }
+      : { ...input, prompt: `${input.prompt}\n\nРаботаешь в команде. ${ASK_FOR_HANDOFF}` });
     if (task.status === 'failed') throw new Error(task.result ?? 'Не удалось запустить первый ход');
 
     const author = { executor: input.executor, model: input.model, effort: input.effort, access: input.access };
@@ -152,7 +155,8 @@ export function createTeamCoordinator(
       status: 'running',
       createdAt: Date.now(),
       turns: [
-        { role: 'author', ...author, status: 'running', taskId: task.id, agentId: task.agentId },
+        ...(planner ? [{ role: 'planner' as const, ...planner, access: 'read' as const, status: 'running' as const, taskId: task.id, agentId: task.agentId }] : []),
+        { role: 'author', ...author, status: planner ? 'waiting' : 'running', ...(planner ? {} : { taskId: task.id, agentId: task.agentId }) },
         ...participants.map((p): CollabTurn => ({ role: 'reviewer', ...p, access: 'read', status: 'waiting' })),
         { role: 'finisher', ...author, status: 'waiting' },
       ],
@@ -224,11 +228,14 @@ export function createTeamCoordinator(
     const finalTurn = next.role === 'finisher';
     const instruction = finalTurn
       ? 'Учитывая сообщения коллег, заверши задачу, дай пользователю итог и укажи нерешённые вопросы.'
+      : next.role === 'author'
+      ? `Ты основной исполнитель: выполни большую часть работы по плану коллеги, включая написание кода, если это разрешено выбранным доступом. Если план нужно изменить, объясни почему. ${ASK_FOR_HANDOFF}`
       : `${REVIEWER} ${ASK_FOR_HANDOFF}`;
     // Colleagues review with read access only; the author keeps the user's access for the final turn.
     const input: NewTask = { ...team.original, executor: next.executor, model: next.model, effort: next.effort, access: next.access };
     try {
-      const created = board.create({ ...input, prompt: buildPrompt(team.original.prompt, answers, instruction) });
+      const prompt = buildPrompt(team.original.prompt, answers, instruction);
+      const created = finalTurn ? finishInAuthorSession(collab, input, prompt) : board.create({ ...input, prompt });
       if (created.status === 'failed') throw new Error(created.result ?? 'Не удалось запустить коллегу');
       Object.assign(next, { status: 'running', taskId: created.id, agentId: created.agentId });
       // Swap the finished turn for the next one in a single save: there is no moment when
@@ -243,6 +250,23 @@ export function createTeamCoordinator(
       stop();
       onError(reason);
     }
+  }
+
+  /**
+   * The finisher is the author again: when its session can be resumed, it continues there
+   * and still knows what it did in the first turn. Otherwise it starts fresh with the history.
+   */
+  function finishInAuthorSession(collab: Collaboration, input: NewTask, prompt: string): Task {
+    const authorTask = collab.turns.find((turn) => turn.role === 'author')?.taskId;
+    if (authorTask && board.reply) {
+      try {
+        return board.reply(authorTask, { prompt, access: input.access, model: input.model, effort: input.effort });
+      } catch (error) {
+        // A missing session can start fresh; safety and concurrency refusals must not be bypassed.
+        if (!(error instanceof Error) || !/Сессия этого агента неизвестна|Задача не найдена/.test(error.message)) throw error;
+      }
+    }
+    return board.create({ ...input, prompt });
   }
 
   /** Stop a collaboration: cancel its running turn; nothing starts after it. */
