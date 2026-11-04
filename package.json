@@ -15,7 +15,7 @@
     "office": "npm run dev -w @land/office",
     "build": "npm run build -w @land/office",
     "typecheck": "tsc -p apps/daemon && tsc -p apps/office",
-    "test": "node --disable-warning=ExperimentalWarning --test \"apps/daemon/src/**/*.test.ts\""
+    "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=2 \"apps/daemon/src/**/*.test.ts\""
   },
   "devDependencies": {
     "typescript": "^5.9.3"

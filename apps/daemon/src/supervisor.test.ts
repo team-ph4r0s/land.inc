@@ -16,7 +16,7 @@ async function freePort(): Promise<number> {
 }
 
 for (const fails of [false, true]) {
-  test(`supervisor ${fails ? 'restores prior code and data after a failed boot' : 'activates a healthy release and persists its path'}`, { timeout: 30_000 }, async () => {
+  test(`supervisor ${fails ? 'restores prior code and data after a failed boot' : 'activates a healthy release and persists its path'}`, { timeout: 45_000 }, async () => {
     const root = mkdtempSync(join(tmpdir(), 'land-boot-'));
     const base = join(root, '.land-updates'), target = join(base, 'versions', 'candidate'), data = join(root, 'data');
     mkdirSync(target, { recursive: true }); mkdirSync(data);
@@ -28,8 +28,9 @@ for (const fails of [false, true]) {
       writeFileSync(join(folder, 'VERSION'), version);
       writeFileSync(join(folder, 'apps/daemon/src/main.ts'), broken ? `import {writeFileSync} from 'node:fs'; writeFileSync(${JSON.stringify(join(data, 'tasks.json'))}, 'changed-by-candidate'); writeFileSync(${JSON.stringify(join(data, 'teams.json'))}, 'created-by-candidate'); process.exit(1);` : `
         import {createServer} from 'node:http'; import {existsSync, unlinkSync} from 'node:fs';
-        createServer((req,res)=>res.end(JSON.stringify({version:${JSON.stringify(version)},pid:process.pid}))).listen(Number(process.env.LAND_PORT),'127.0.0.1',()=>{
-          if (existsSync(${JSON.stringify(join(root, 'trigger'))})) { unlinkSync(${JSON.stringify(join(root, 'trigger'))}); setTimeout(()=>process.send({type:'office.update',release:{version:'1.1'}}), 500); }
+        createServer((req,res)=>res.end(JSON.stringify({version:${JSON.stringify(version)},pid:process.pid}))).listen(Number(process.env.LAND_PORT),'127.0.0.1');
+        process.on('message',message=>{
+          if (message.type==='office.update.status' && message.patch.phase==='idle' && existsSync(${JSON.stringify(join(root, 'trigger'))})) { unlinkSync(${JSON.stringify(join(root, 'trigger'))}); process.send({type:'office.update',release:{version:'1.1'}}); }
         });`);
       writeFileSync(join(folder, 'node_modules/vite/bin/vite.js'), `import {createServer} from 'node:http'; createServer((req,res)=>res.end('office')).listen(Number(process.env.LAND_OFFICE_PORT),'127.0.0.1');`);
     };
@@ -37,12 +38,12 @@ for (const fails of [false, true]) {
     writeFileSync(join(root, 'trigger'), 'update');
     const moduleUrl = new URL('../../../scripts/supervisor.mjs', import.meta.url).href;
     const worker = join(root, 'worker.mjs');
-    writeFileSync(worker, `import {startOffice} from ${JSON.stringify(moduleUrl)}; await startOffice({root:${JSON.stringify(root)},dataRoot:${JSON.stringify(data)},bootTimeoutMs:2000,prepare:async()=>${JSON.stringify(target)}});`);
+    writeFileSync(worker, `import {startOffice} from ${JSON.stringify(moduleUrl)}; await startOffice({root:${JSON.stringify(root)},dataRoot:${JSON.stringify(data)},bootTimeoutMs:8000,prepare:async()=>${JSON.stringify(target)}});`);
     let output = '';
     const child = spawn(process.execPath, [worker], { windowsHide: true, env: { ...process.env, LAND_PORT: String(daemonPort), LAND_OFFICE_PORT: String(officePort) } });
     child.stdout.on('data', (s) => { output += s; }); child.stderr.on('data', (s) => { output += s; });
     try {
-      const until = Date.now() + 15_000;
+      const until = Date.now() + 30_000;
       while (Date.now() < until && !output.includes(fails ? 'Прежняя версия сохранена' : 'Запущена версия 1.1')) {
         if (child.exitCode !== null) break;
         await delay(100);

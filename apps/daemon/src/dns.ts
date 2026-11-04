@@ -47,7 +47,7 @@ export class WindowsDnsBackend implements DnsBackend {
   supported = process.platform === 'win32';
   async read(): Promise<Adapter[]> {
     try {
-      const { stdout } = await exec(ps, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded(script() + '\nConvertTo-Json -InputObject @(Get-LandDnsAdapters) -Depth 8 -Compress')], { windowsHide: true, timeout: 15_000, encoding: 'utf8', maxBuffer: 512 * 1024 });
+      const { stdout } = await exec(ps, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded(script() + '\nConvertTo-Json -InputObject @(Get-LandDnsAdapters) -Depth 8 -Compress')], { windowsHide: true, timeout: 30_000, encoding: 'utf8', maxBuffer: 512 * 1024 });
       return JSON.parse(stdout.replace(/^\uFEFF/, '').trim());
     } catch { throw new Error('Не удалось прочитать DNS Windows. Проверьте доступ к сетевым адаптерам и повторите обновление.'); }
   }

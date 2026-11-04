@@ -116,7 +116,12 @@ send = connect(
   (m) => {
     switch (m.type) {
       case 'updates': {
-        if (installedVersion && installedVersion !== m.state.current) { location.reload(); return; }
+        if (installedVersion && installedVersion !== m.state.current) {
+          // The daemon can reconnect before Vite is listening. Reload only after
+          // the supervisor confirms that both parts of the new office are ready.
+          if (m.state.phase === 'switching' || m.state.phase === 'preparing') { updatePanel.set(m.state); return; }
+          location.reload(); return;
+        }
         installedVersion = m.state.current;
         updatePanel.set(m.state);
         office.setUpdate(m.state);

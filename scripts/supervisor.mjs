@@ -61,7 +61,7 @@ export async function startOffice(options = {}) {
   process.on('SIGINT', () => void shutdown());
   process.on('SIGTERM', () => void shutdown());
 
-  const boot = async (target, booting = false) => {
+  const boot = async (target, booting = true) => {
     const env = { ...process.env, LAND_LAUNCH_ROOT: launchRoot, ...(booting ? { LAND_UPDATE_BOOTING: '1' } : {}) };
     const args = process.argv.includes('--demo') ? ['--demo'] : [];
     if (process.argv.includes('--fake-agents')) args.push('--fake-agents', '--no-real');
@@ -73,7 +73,7 @@ export async function startOffice(options = {}) {
       child.on('error', (error) => log(error.message));
     }
     daemon.on('message', (message) => {
-      if (message?.type === 'office.update' && !updating && !closing) void install(message.release);
+      if (message?.type === 'office.update' && !updating && !closing && !transition) void install(message.release);
     });
     const until = Date.now() + (options.bootTimeoutMs ?? 45_000);
     while (Date.now() < until) {
@@ -131,7 +131,11 @@ export async function startOffice(options = {}) {
     } finally { updating = false; }
   };
 
-  try { await boot(root); transition = false; }
+  try {
+    await boot(root);
+    transition = false;
+    daemon.send({ type: 'office.update.status', patch: { phase: 'idle', message: 'Офис готов. Проверить, не приехала ли новая версия?' } });
+  }
   catch (error) {
     await stopChildren();
     if (root !== launchRoot) {

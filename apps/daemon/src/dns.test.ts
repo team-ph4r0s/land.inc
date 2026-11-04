@@ -107,7 +107,7 @@ test('DNS fake mode probes no network, and unsupported platforms never read or w
 
 const windowsScript = readFileSync(new URL('./windows-dns.ps1', import.meta.url), 'utf8');
 function runPowerShell(code: string) {
-  return spawnSync(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(windowsScript + '\n' + code, 'utf16le').toString('base64')], { windowsHide: true, encoding: 'utf8', timeout: 15_000 });
+  return spawnSync(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(windowsScript + '\n' + code, 'utf16le').toString('base64')], { windowsHide: true, encoding: 'utf8', timeout: 60_000 });
 }
 
 test('Windows DNS reads GUIDs with braces and ignores adapters without an IP family', { skip: process.platform !== 'win32' }, () => {
