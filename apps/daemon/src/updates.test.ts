@@ -3,9 +3,40 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { newer, validVersion, githubRepo, prepareRelease, UpdatesService, run, type Runner } from './updates.ts';
+import { delimiter, dirname, join } from 'node:path';
+import { newer, validVersion, githubRepo, prepareRelease, findNpmCli, UpdatesService, run, type Runner } from './updates.ts';
 import type { OfficeRelease } from '@land/protocol';
+
+test('npm discovery supports direct node launches, stale hints, PATH installs and refuses shims', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'land-npm-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const node = join(root, 'runtime', 'node.exe');
+  const bundled = join(dirname(node), 'node_modules/npm/bin/npm-cli.js');
+  const pathDir = join(root, 'npm global with spaces');
+  const globalCli = join(pathDir, 'node_modules/npm/bin/npm-cli.js');
+  const options = { node, path: '', appData: '' };
+  mkdirSync(dirname(bundled), { recursive: true }); writeFileSync(bundled, '// fixture');
+  assert.equal(findNpmCli('', options), bundled);
+  assert.equal(findNpmCli(join(root, 'stale', 'npm-cli.js'), options), bundled);
+  const hint = join(root, 'chosen', 'npm-cli.js');
+  mkdirSync(dirname(hint)); writeFileSync(hint, '// selected npm');
+  assert.equal(findNpmCli(hint, options), hint);
+  rmSync(bundled);
+  mkdirSync(dirname(globalCli), { recursive: true }); writeFileSync(globalCli, '// global npm');
+  assert.equal(findNpmCli('', { ...options, path: [join(root, 'missing'), `"${pathDir}"`].join(delimiter) }), globalCli);
+  const shim = join(pathDir, 'npm.cmd'); writeFileSync(shim, '@echo off');
+  assert.throws(() => findNpmCli(shim, options), /Не найден npm CLI/);
+  mkdirSync(bundled); // a directory named npm-cli.js is not a CLI
+  assert.throws(() => findNpmCli(bundled, options), /Не найден npm CLI/);
+  const roaming = join(root, 'roaming', 'npm/node_modules/npm/bin/npm-cli.js');
+  mkdirSync(dirname(roaming), { recursive: true }); writeFileSync(roaming, '// user npm');
+  assert.equal(findNpmCli('', { ...options, appData: join(root, 'roaming') }), roaming);
+});
+
+test('npm discovered without npm_execpath actually runs under the current Node runtime', () => {
+  const cli = findNpmCli('');
+  assert.match(execFileSync(process.execPath, [cli, '--version'], { encoding: 'utf8', windowsHide: true }).trim(), /^\d+\.\d+\.\d+$/);
+});
 
 test('release versions compare numerically and remotes cannot contain credential URLs or arbitrary hosts', () => {
   assert.equal(newer('1.10', '1.9'), true);
@@ -73,15 +104,16 @@ test('staging a release uses an independent Git checkout and refuses a changed t
     git(source, ['checkout', '--detach', 'HEAD~1']);
     const release: OfficeRelease = { version: '1.1', tag: 'v1.1', sha, url: '', notes: '' };
     let npmCalls = 0;
+    const npmCli = findNpmCli('');
     const runner: Runner = async (command, args, cwd) => {
       if (command === 'git' && args[0] === 'remote' && args[1] === 'get-url') return 'https://github.com/example/office.git';
       if (command === 'git' && args[0] === 'fetch') return run(command, args.map((a) => a === 'origin' ? origin : a), cwd);
-      if (command === process.execPath) { npmCalls++; return ''; } // no network or dependency scripts in this fixture
+      if (command === process.execPath) { assert.equal(args[0], npmCli); npmCalls++; return ''; } // no network or dependency scripts in this fixture
       return run(command, args, cwd);
     };
-    await assert.rejects(prepareRelease(source, base, { ...release, sha: 'a'.repeat(40) }, process.execPath, () => {}, runner), /Тег релиза изменился/);
+    await assert.rejects(prepareRelease(source, base, { ...release, sha: 'a'.repeat(40) }, '', () => {}, runner), /Тег релиза изменился/);
     assert.equal(npmCalls, 0);
-    const target = await prepareRelease(source, base, release, process.execPath, () => {}, runner);
+    const target = await prepareRelease(source, base, release, '', () => {}, runner);
     assert.equal(readFileSync(join(target, 'VERSION'), 'utf8').trim(), '1.1');
     assert.equal(readFileSync(join(source, 'VERSION'), 'utf8').trim(), '1.0');
     assert.equal(npmCalls, 4);

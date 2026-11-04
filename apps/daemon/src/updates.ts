@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { dirname, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type { OfficeRelease, UpdateState } from '@land/protocol';
 
@@ -30,12 +30,32 @@ export async function clean(root: string, runner = run): Promise<void> {
     throw new Error('В установленной версии есть локальные изменения. Сохраните их коммитом или уберите вручную перед обновлением; офис их не перезаписывает');
 }
 
+/** npm_execpath is absent when an office is started with node or a desktop shortcut. */
+export function findNpmCli(hint = process.env.npm_execpath, options: { node?: string; path?: string; appData?: string } = {}): string {
+  const node = options.node ?? process.execPath;
+  const dirs = [dirname(node)];
+  try { dirs.push(dirname(realpathSync(node))); } catch { /* probe the supplied installation path */ }
+  dirs.push(...(options.path ?? process.env.PATH ?? '').split(delimiter).map((p) => p.replace(/^"|"$/g, '')).filter((p) => isAbsolute(p)));
+  const appData = options.appData ?? process.env.APPDATA;
+  const candidates = [
+    hint,
+    ...dirs.flatMap((dir) => [join(dir, 'node_modules/npm/bin/npm-cli.js'), join(dir, '../lib/node_modules/npm/bin/npm-cli.js'), join(dir, '../share/nodejs/npm/bin/npm-cli.js')]),
+    ...(appData ? [join(appData, 'npm/node_modules/npm/bin/npm-cli.js')] : []),
+  ];
+  for (const candidate of candidates) {
+    if (!candidate || !isAbsolute(candidate) || basename(candidate).toLowerCase() !== 'npm-cli.js') continue;
+    try { if (statSync(candidate).isFile()) return candidate; } catch { /* next installation */ }
+  }
+  throw new Error('Не найден npm CLI рядом с Node.js или в PATH. Установите Node.js с npm и перезапустите офис');
+}
+
 /** Prepare a complete independent installation. The running checkout and node_modules are untouched. */
-export async function prepareRelease(source: string, base: string, release: OfficeRelease, npm: string, report: (message: string) => void, runner = run): Promise<string> {
+export async function prepareRelease(source: string, base: string, release: OfficeRelease, npm: string | undefined, report: (message: string) => void, runner = run): Promise<string> {
   if (!validVersion(release.version) || release.tag !== `v${release.version}` || !/^[a-f0-9]{40,64}$/.test(release.sha)) throw new Error('Некорректный релиз');
   await clean(source, runner);
   const origin = await runner('git', ['remote', 'get-url', 'origin'], source);
   githubRepo(origin);
+  const npmPath = findNpmCli(npm);
   const target = join(base, 'versions', `${release.version}-${randomUUID()}`);
   mkdirSync(dirname(target), { recursive: true });
   report('Получаем отдельную копию релиза…');
@@ -46,14 +66,13 @@ export async function prepareRelease(source: string, base: string, release: Offi
   if (sha !== release.sha) throw new Error('Тег релиза изменился после проверки. Проверьте обновления заново');
   await runner('git', ['checkout', '--detach', sha], target);
   if (version(target) !== release.version) throw new Error('VERSION не соответствует тегу релиза');
-  if (!existsSync(npm)) throw new Error('Не найден npm CLI. Запустите офис через npm run dev');
   report('Устанавливаем зависимости в новой папке…');
-  await runner(process.execPath, [npm, 'ci', '--engine-strict'], target);
+  await runner(process.execPath, [npmPath, 'ci', '--engine-strict'], target);
   report('Проверяем TypeScript и тесты…');
-  await runner(process.execPath, [npm, 'run', 'typecheck'], target);
-  await runner(process.execPath, [npm, 'test'], target);
+  await runner(process.execPath, [npmPath, 'run', 'typecheck'], target);
+  await runner(process.execPath, [npmPath, 'test'], target);
   report('Собираем новую версию…');
-  await runner(process.execPath, [npm, 'run', 'build'], target);
+  await runner(process.execPath, [npmPath, 'run', 'build'], target);
   await clean(source, runner);
   await clean(target, runner);
   return target;

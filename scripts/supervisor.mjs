@@ -95,7 +95,7 @@ export async function startOffice(options = {}) {
     let backup;
     let switching = false;
     try {
-      const target = await (options.prepare ?? prepareRelease)(root, base, release, process.env.npm_execpath ?? '', (message) => status('preparing', message));
+      const target = await (options.prepare ?? prepareRelease)(root, base, release, process.env.npm_execpath, (message) => status('preparing', message));
       backup = join(base, 'backups', `${Date.now()}`);
       mkdirSync(backup, { recursive: true });
       const missing = [];
