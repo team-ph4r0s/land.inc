@@ -280,7 +280,9 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
     if (task.finishedAt) return;
     task.status = status;
     task.finishedAt = Date.now();
-    task.result = result && result.length > 4_000 ? result.slice(0, 4_000) + '…' : result;
+    // Keep the answer in the persisted task too: the UI and a restarted daemon
+    // must see the same text as the session continuation (bounded CLI capture).
+    task.result = result;
     if (result) {
       this.full.set(task.id, result.slice(-200_000));
       if (this.full.size > 20) this.full.delete(this.full.keys().next().value!);

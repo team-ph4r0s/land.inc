@@ -1,0 +1,55 @@
+<!doctype html><html lang="ru"><meta charset="utf-8"><title>Office panel regression checks</title>
+<body><output id="checks">Running…</output><aside id="sidebar"><div class="pane tasks"></div></aside>
+<script type="module">
+import { TaskBoardPanel } from '/src/board.ts';
+import { OfficeResidents } from '/src/residents.ts';
+import { SCRIPTS } from '/src/resident-life.ts';
+import { Container } from 'pixi.js';
+import { walkable } from '/src/layout.ts';
+import '/src/style.css';
+const checks = [];
+const check = (condition, name) => { if (!condition) throw new Error(name); checks.push(name); };
+try {
+  const sent = [];
+  const panel = new TaskBoardPanel(document.querySelector('.pane.tasks'), (m) => { sent.push(m); return true; }, () => {});
+  const config = { projects: ['C:/test'], outsideGit: [], executors: Object.fromEntries(['codex','claude','antigravity'].map((e) => [e,{available:true,models:[{id:'test',label:'Test'}]}])) };
+  const root = { id:'root', prompt:'Длинный ответ', result:'Начало\n'+'строка\n'.repeat(1500)+'КОНЕЦ', cwd:'C:/test',executor:'codex', model:'test', access:'read',status:'done',createdAt:1,agentId:'session' };
+  const other = {...root,id:'other',createdAt:2,prompt:'Другой разговор'};
+  panel.setBoard(config,[other,root]);
+  const click = (selector) => document.querySelector(selector).click();
+  const type = (value) => { const a=document.querySelector('.composer textarea'); a.value=value; a.dispatchEvent(new Event('input',{bubbles:true})); return a; };
+  click('[data-act="thread"][data-id="root"]');
+  check(document.querySelector('.messages').textContent.includes('КОНЕЦ'),'long answer has its tail');
+  const area=type('Черновик корня'); area.focus(); area.setSelectionRange(3,7);
+  panel.upsert({...other,result:'Обновление'});
+  check(document.querySelector('.composer textarea')===area && area.value==='Черновик корня' && area.selectionStart===3,'updates preserve composer DOM, text and caret');
+  click('[data-act="thread"][data-id="other"]'); type('Второй черновик');
+  click('[data-act="thread"][data-id="root"]');
+  check(document.querySelector('.composer textarea').value==='Черновик корня','per-conversation draft restored');
+  document.querySelector('.composer textarea').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,bubbles:true}));
+  check(sent.at(-1).type==='task.reply' && sent.at(-1).taskId==='root','Ctrl+Enter replies to selected session');
+  const request=sent.at(-1).requestId;
+  click('[data-act="thread"][data-id="other"]');
+  panel.submissionResult(request,'Проверочный отказ');
+  click('[data-act="thread"][data-id="root"]');
+  check(document.querySelector('.composer textarea').value==='Черновик корня' && document.querySelector('.composer').textContent.includes('Проверочный отказ'),'rejection after switching preserves draft and error');
+  click('[data-act="reply-send"]');
+  const accepted=sent.at(-1).requestId;
+  panel.upsert({...root,id:'reply',continues:'root',prompt:'Черновик корня',createdAt:3,status:'running',result:undefined});
+  panel.submissionResult(accepted);
+  panel.upsert({...root,id:'reply',continues:'root',prompt:'Черновик корня',createdAt:3});
+  check(document.querySelectorAll('.conversation-turn').length===2,'continuation stays in one history');
+  check(document.querySelector('.composer textarea').value==='','accepted reply clears draft');
+  type('Продолжить'); click('[data-act="reply-send"]');
+  check(sent.at(-1).taskId==='reply','next reply targets latest turn');
+  const residents=new OfficeResidents(new Container(), () => 0.4);
+  const positions=new Set();
+  for(let i=0;i<1800;i++){residents.update(0.1,[{x:5,y:5}]);for(const r of residents.life.people){check(Number.isFinite(r.x)&&r.x>=0&&r.x<24&&r.y>=0&&r.y<18,'residents stay inside office');check(walkable(Math.round(r.x),Math.round(r.y))&&r.path.every(p=>walkable(p.x,p.y)),'routes avoid office furniture');positions.add(r.id+':'+Math.round(r.x)+','+Math.round(r.y));}}
+  check(positions.size>50,'all three residents keep moving through multiple activities');
+  check(residents.life.people.length===3,'three permanent residents without sessions');
+  const poses=new OfficeResidents(new Container());
+  for(const r of poses.life.people) for(const script of SCRIPTS[r.id]) for(const b of script){ Object.assign(r,{action:b.action,text:b.text,age:1.2,remaining:99,path:[]}); poses.update(0,[]); }
+  check(true,'every resident action renders without an exception');
+  document.querySelector('#checks').textContent='PASS: '+[...new Set(checks)].join('; ');
+} catch(e) { document.querySelector('#checks').textContent='FAIL: '+e.stack; }
+</script></body></html>

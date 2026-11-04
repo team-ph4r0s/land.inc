@@ -23,7 +23,7 @@ export class Sidebar {
   private count = 0;
   private running = 0;
   private meeting = 0;
-  private tab: Tab = 'office';
+  private tab: Tab = 'tasks';
   private head: HTMLElement;
   private el: HTMLElement;
   /** Host element for the task board panel. */
@@ -32,11 +32,26 @@ export class Sidebar {
   readonly teamPane: HTMLElement;
   readonly dnsPane: HTMLElement;
   readonly updatesPane: HTMLElement;
+  onConversation?: (id: string) => void;
   private onPick: (id: string) => void;
   private last?: [Map<string, AgentState>, Map<string, LogEntry[]>, string | undefined];
 
   constructor(root: HTMLElement, onPick: (id: string) => void) {
-    root.innerHTML = '<div class="head"></div><div class="pane office"></div><div class="pane tasks" hidden></div><div class="pane team" hidden></div><div class="pane dns" hidden></div><div class="pane updates" hidden></div>';
+    root.innerHTML = '<div class="panel-resizer" role="separator" tabindex="0" aria-label="Ширина рабочей панели" aria-orientation="vertical" aria-valuemin="380" aria-valuemax="1100" aria-valuenow="560"></div><div class="head"></div><div class="pane office" hidden></div><div class="pane tasks"></div><div class="pane team" hidden></div><div class="pane dns" hidden></div><div class="pane updates" hidden></div>';
+    const resize = root.querySelector<HTMLElement>('.panel-resizer')!;
+    const setWidth = (width: number) => {
+      const value = Math.round(Math.max(380, Math.min(width, window.innerWidth - 180, 1100)));
+      root.style.setProperty('--panel-width', `${value}px`);
+      resize.setAttribute('aria-valuenow', String(value));
+      try { localStorage.setItem('land-panel-width', String(value)); } catch { /* optional */ }
+    };
+    try { const width = Number(localStorage.getItem('land-panel-width')); if (width) setWidth(width); } catch { /* optional */ }
+    resize.addEventListener('pointerdown', (e) => { resize.setPointerCapture(e.pointerId); });
+    resize.addEventListener('pointermove', (e) => { if (resize.hasPointerCapture(e.pointerId)) setWidth(root.getBoundingClientRect().right - e.clientX); });
+    resize.addEventListener('pointerup', (e) => { if (resize.hasPointerCapture(e.pointerId)) resize.releasePointerCapture(e.pointerId); });
+    resize.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); setWidth(root.clientWidth + (e.key === 'ArrowLeft' ? 40 : -40)); }
+    });
     this.head = root.querySelector('.head')!;
     this.el = root.querySelector('.pane.office')!;
     this.tasksPane = root.querySelector('.pane.tasks')!;
@@ -45,6 +60,7 @@ export class Sidebar {
     this.updatesPane = root.querySelector('.pane.updates')!;
     this.onPick = onPick;
     this.el.addEventListener('click', (e) => {
+      if ((e.target as HTMLElement).closest('[data-conversation]') && this.last?.[2]) { this.onConversation?.(this.last[2]); return; }
       const row = (e.target as HTMLElement).closest<HTMLElement>('[data-id]');
       if (row) this.onPick(row.dataset.id!);
     });
@@ -131,26 +147,34 @@ export class Sidebar {
       }
     }
     if (selected && states.has(selected)) {
-      const entries = (logs.get(selected) ?? []).slice(-15).reverse();
-      html += `<h3>Журнал</h3><div class="log">${entries
-        .map((e) => `<div class="entry ${e.kind}"><span>${new Date(e.at).toLocaleTimeString()}</span>${esc(e.text)}</div>`)
+      const roster = html;
+      const entries = logs.get(selected) ?? [];
+      html = `<div class="agent-journal"><h3>${esc(states.get(selected)!.title)}</h3>${states.get(selected)!.taskId ? '<button type="button" data-conversation>Открыть разговор и ответить →</button>' : '<p class="note">Наблюдаемая сессия · ответы доступны в приложении агента</p>'}<div class="log">${entries
+        .map((e) => `<div class="entry ${e.kind}"><span>${new Date(e.at).toLocaleTimeString()} · ${e.kind === 'user' ? 'Вы' : e.kind === 'assistant' ? 'Агент' : 'Событие'}</span>${esc(e.text)}</div>`)
         .join('') || '<p class="empty">Пока пусто</p>'}</div>`;
+      html += '</div><h3>Сотрудники</h3>' + roster;
     }
     // The roster re-renders every few seconds; keep keyboard focus on the same agent.
     const focused = this.el.contains(document.activeElement) ? (document.activeElement as HTMLElement).closest<HTMLElement>('[data-id]')?.dataset.id : undefined;
-    this.el.innerHTML = html;
-    if (focused) [...this.el.querySelectorAll<HTMLElement>('[data-id]')].find((r) => r.dataset.id === focused)?.focus();
+    if (this.el.innerHTML !== html) {
+      const top = this.el.scrollTop;
+      this.el.innerHTML = html;
+      this.el.scrollTop = top;
+    }
+    if (focused) [...this.el.querySelectorAll<HTMLElement>('[data-id]')].find((r) => r.dataset.id === focused)?.focus({ preventScroll: true });
   }
 
   private renderHead(): void {
     const badge = this.running ? ` <b>${this.running}</b>` : '';
-    this.head.innerHTML = `<header><div><span class="sidebar-eyebrow">ВАША КОМАНДА</span><h1>Офис и задачи</h1><p>События рабочего пространства</p></div>
+    const html = `<header><div><span class="sidebar-eyebrow">ВАША КОМАНДА</span><h1>Офис и задачи</h1><p>События рабочего пространства</p></div>
       <div class="status ${this.online ? 'on' : 'off'}">${this.online ? `● ${this.count} в офисе` : 'нет связи'}</div></header>
-      <nav class="tabs">
+      <nav class="tabs" aria-label="Рабочая панель">
         <button type="button" data-tab="office" class="${this.tab === 'office' ? 'on' : ''}">Сотрудники</button>
-        <button type="button" data-tab="tasks" class="${this.tab === 'tasks' ? 'on' : ''}">Задачи${badge}</button>
+        <button type="button" data-tab="tasks" class="${this.tab === 'tasks' ? 'on' : ''}">Разговоры${badge}</button>
         <button type="button" data-tab="team" class="${this.tab === 'team' ? 'on' : ''}">Переговорка${this.meeting ? ` <b>${this.meeting}</b>` : ''}</button>
         <button type="button" data-tab="dns" class="${this.tab === 'dns' ? 'on' : ''}">DNS</button>
+        <button type="button" data-tab="updates" class="${this.tab === 'updates' ? 'on' : ''}">Обновления</button>
       </nav>`;
+    if (this.head.innerHTML !== html) this.head.innerHTML = html;
   }
 }

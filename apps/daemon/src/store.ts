@@ -165,7 +165,8 @@ export class Store extends EventEmitter<{ message: [ServerMessage] }> {
   log(id: string, entry: LogEntry): void {
     const a = this.agents.get(id);
     if (!a || !entry.text) return;
-    entry.text = entry.text.length > 400 ? entry.text.slice(0, 400) + '…' : entry.text;
+    const limit = entry.kind === 'user' || entry.kind === 'assistant' ? 200_000 : 4_000;
+    entry = { ...entry, text: entry.text.length > limit ? entry.text.slice(0, limit) + '\n[Достигнут лимит сообщения]' : entry.text };
     a.log.push(entry);
     if (a.log.length > LOG_LIMIT) a.log.shift();
     this.emit('message', { type: 'log', id, entry });

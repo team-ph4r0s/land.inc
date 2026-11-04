@@ -7,6 +7,9 @@ export interface Look {
   shirt: number;
   skin: number;
   hair: number;
+  bald?: boolean;
+  glasses?: boolean;
+  civilian?: boolean;
 }
 
 /** What it is doing this frame. */
@@ -18,6 +21,7 @@ export interface Pose {
   mood?: Mood;
   /** Seconds spent in the current activity. */
   busyFor: number;
+  expression?: 'grin' | 'tongue' | 'wink' | 'laugh' | 'surprised' | 'dizzy';
 }
 
 const INK = 0x1f2430;
@@ -98,9 +102,15 @@ export function drawCharacter(g: Graphics, look: Look, pose: Pose): number {
 
   // Head and face
   g.circle(0, hy, R).fill(look.skin);
-  hair(g, look, hy, R);
+  if (!look.bald) hair(g, look, hy, R);
+  else g.ellipse(-3, hy - 6, 4, 2).fill({ color: 0xffffff, alpha: 0.24 });
   face(g, pose, hy);
-  headwear(g, look, hy, R, t);
+  if (look.glasses) {
+    g.roundRect(-9, hy - 2, 8, 7, 2).fill({ color: 0xbfe3f5, alpha: 0.22 }).stroke({ width: 1.5, color: INK });
+    g.roundRect(1, hy - 2, 8, 7, 2).fill({ color: 0xbfe3f5, alpha: 0.22 }).stroke({ width: 1.5, color: INK });
+    g.moveTo(-1, hy).lineTo(1, hy).stroke({ width: 1.5, color: INK });
+  }
+  if (!look.civilian) headwear(g, look, hy, R, t);
 
   // Emotes
   let top = hy - R - (look.kind === 'fable' || look.kind === 'luna' ? 14 : look.kind === 'astra' ? 12 : 4);
@@ -154,6 +164,25 @@ function hair(g: Graphics, look: Look, hy: number, R: number): void {
 
 function face(g: Graphics, pose: Pose, hy: number): void {
   const { activity: a, mood, t } = pose;
+  if (pose.expression) {
+    const expression = pose.expression;
+    for (const x of [-4.5, 4.5]) {
+      if (expression === 'laugh' || expression === 'wink' && x > 0) g.moveTo(x - 2.5, hy + 1).quadraticCurveTo(x, hy - 2, x + 2.5, hy + 1).stroke({ width: 1.5, color: INK });
+      else if (expression === 'dizzy') {
+        g.moveTo(x - 2, hy - 1).lineTo(x + 2, hy + 3).moveTo(x + 2, hy - 1).lineTo(x - 2, hy + 3).stroke({ width: 1.4, color: INK });
+      } else {
+        g.circle(x, hy + 1, expression === 'surprised' ? 3 : 2).fill(0xffffff);
+        g.circle(x + (expression === 'tongue' ? (x < 0 ? 1 : -1) : 0), hy + 1, 1.4).fill(INK);
+      }
+    }
+    if (expression === 'surprised') g.ellipse(0, hy + 7, 2.6, 3.5).fill(0x7f1d1d);
+    else {
+      g.ellipse(0, hy + 7, expression === 'laugh' ? 5 : 4, expression === 'laugh' ? 3 + Math.abs(Math.sin(t * 9)) : 2.5).fill(0x7f1d1d);
+      if (expression === 'tongue') g.roundRect(0, hy + 7, 4, 5, 2).fill(0xf0879a);
+      else g.rect(-3, hy + 5, 6, 1.5).fill(0xffffff);
+    }
+    return;
+  }
   const ex = 4.5;
   const ey = hy + 1;
   const blink = Math.sin(t * 1.7) > 0.985;

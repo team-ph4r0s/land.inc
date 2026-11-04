@@ -1,4 +1,5 @@
 import type { Access, BoardConfig, ClientMessage, Executor, ModelOption, Task } from '@land/protocol';
+import { conversations, isLive, messageHtml } from './conversations';
 
 const STATUS: Record<Task['status'], string> = {
   starting: 'запускается',
@@ -55,6 +56,14 @@ export class TaskBoardPanel {
   private folderPath?: string;
   private folderParent?: string;
   private initialized = false;
+  private selected?: string;
+  private composing = false;
+  private browsing = true;
+  private search = '';
+  private drafts = new Map<string, NonNullable<TaskBoardPanel['reply']>>();
+  private scrolls = new Map<string, number>();
+  private messagesKey = '';
+  private composerKey = '';
   /**
    * The reply form under a finished task. The list re-renders on every update, so what
    * the user typed lives here and is put back each time.
@@ -69,6 +78,14 @@ export class TaskBoardPanel {
   }
 
   /** Agents currently in the office, so a task can offer "show in the office". */
+  openForAgent(id: string): void {
+    this.selected = conversations(this.tasks).find((c) => c.turns.some((t) => t.agentId === id))?.id;
+    this.reply = undefined;
+    this.composing = false;
+    this.browsing = false;
+    this.renderList();
+  }
+
   setAgents(ids: Set<string>): void {
     this.known = ids;
     this.renderList();
@@ -88,6 +105,11 @@ export class TaskBoardPanel {
     const i = this.tasks.findIndex((t) => t.id === task.id);
     if (i >= 0) this.tasks[i] = task;
     else this.tasks.unshift(task);
+    if (this.pending && task.prompt === this.pending.prompt) {
+      this.selected = conversations(this.tasks).find((c) => c.turns.some((t) => t.id === task.id))?.id;
+      this.composing = false;
+      this.browsing = false;
+    }
     this.renderList();
   }
 
@@ -100,9 +122,14 @@ export class TaskBoardPanel {
   }
 
   submissionResult(id: string, error?: string): void {
-    if (this.reply?.pending === id) {
+    const saved = [...this.drafts].find(([, r]) => r.pending === id);
+    if (this.reply?.pending === id || saved) {
       // Accepted: the reply is a new task at the top of the list. Refused: keep the text and say why.
-      this.reply = error ? { ...this.reply, pending: undefined, error } : undefined;
+      if (saved) {
+        if (error) this.drafts.set(saved[0], { ...saved[1], pending: undefined, error });
+        else this.drafts.delete(saved[0]);
+      }
+      if (this.reply?.pending === id) this.reply = error ? { ...this.reply, pending: undefined, error } : undefined;
       return this.renderList();
     }
     if (this.pending?.id !== id) return;
@@ -111,11 +138,17 @@ export class TaskBoardPanel {
     this.pending = undefined;
     this.updateTeam();
     if (error) this.showError(error);
+    else {
+      // Team prompts include coordinator context and need not equal the form text.
+      if (this.composing) { this.composing = false; this.browsing = true; }
+      this.renderList();
+    }
   }
 
   disconnected(): void {
     const lost = 'Связь прервалась до подтверждения. Проверьте список задач перед повторной отправкой.';
     if (this.reply?.pending) this.submissionResult(this.reply.pending, lost);
+    for (const r of [...this.drafts.values()]) if (r.pending) this.submissionResult(r.pending, lost);
     if (this.pending) this.submissionResult(this.pending.id, lost);
     if (this.folderRequest) { this.folderRequest = undefined; this.folderMessage('Нет связи с демоном'); }
     const refresh = this.form.querySelector<HTMLButtonElement>('[data-refresh]')!;
@@ -222,11 +255,19 @@ export class TaskBoardPanel {
         <p class="error" hidden></p>
         <button type="submit" class="primary">Отправить задачу</button>
       </form>
-      <h3>Задачи</h3>
       <div class="tasks"></div>`;
     this.form = this.el.querySelector('form')!;
     this.list = this.el.querySelector('.tasks')!;
     this.error = this.el.querySelector('.error')!;
+    this.form.insertAdjacentHTML('beforebegin', '<div class="board-toolbar"><button type="button" data-browse>☰ Разговоры</button><button type="button" data-new>＋ Новая задача</button></div><input class="conversation-search" type="search" placeholder="Найти разговор…" aria-label="Поиск разговоров" />');
+    this.list.innerHTML = '<div class="conversation-list" aria-label="Разговоры"></div><section class="conversation"><div class="conversation-head"></div><div class="messages" tabindex="0" aria-label="История разговора"></div><div class="composer"></div></section>';
+    this.el.querySelector('[data-new]')!.addEventListener('click', () => {
+      this.composing = !this.composing;
+      this.renderList();
+      if (this.composing) this.field<HTMLTextAreaElement>('prompt').focus();
+    });
+    this.el.querySelector('[data-browse]')!.addEventListener('click', () => { this.browsing = !this.browsing; this.composing = false; this.renderList(); });
+    this.el.querySelector<HTMLInputElement>('.conversation-search')!.addEventListener('input', (e) => { this.search = (e.target as HTMLInputElement).value.toLocaleLowerCase(); this.renderList(); });
     this.setSeg('executor', 'claude');
     this.setSeg('access', 'read');
 
@@ -298,11 +339,36 @@ export class TaskBoardPanel {
     this.list.addEventListener('click', (e) => {
       const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-act]');
       if (!b) return;
+      if (b.dataset.act === 'thread') {
+        const messages = this.list.querySelector<HTMLElement>('.messages')!;
+        if (this.selected && this.messagesKey) {
+          this.scrolls.set(this.selected, messages.scrollTop);
+          if (this.reply) this.drafts.set(this.selected, this.reply);
+        }
+        this.selected = b.dataset.id;
+        this.reply = this.drafts.get(this.selected!);
+        this.composing = false;
+        this.browsing = false;
+        this.messagesKey = '';
+        this.composerKey = '';
+        this.renderList();
+        return;
+      }
+      if (b.dataset.act === 'copy') {
+        const task = this.tasks.find((t) => t.id === b.dataset.id);
+        if (task?.result) void navigator.clipboard.writeText(task.result).then(() => { b.textContent = 'Скопировано'; }, () => { b.textContent = 'Выделите текст для копирования'; });
+      }
       if (b.dataset.act === 'cancel') this.send({ type: 'task.cancel', id: b.dataset.id! });
+      if (b.dataset.act === 'bottom') {
+        const messages = this.list.querySelector<HTMLElement>('.messages')!;
+        messages.scrollTop = messages.scrollHeight;
+      }
       if (b.dataset.act === 'show') this.onShowAgent(b.dataset.id!);
       if (b.dataset.act === 'reply') {
+        if (this.reply?.pending) return;
         const task = this.tasks.find((t) => t.id === b.dataset.id);
-        this.reply = this.reply?.taskId === b.dataset.id ? undefined : { taskId: b.dataset.id!, draft: '', access: task?.access ?? 'read' };
+        this.reply = { taskId: b.dataset.id!, draft: this.reply?.draft ?? '', access: this.reply?.access ?? task?.access ?? 'read' };
+        this.composerKey = '';
         this.renderList();
         this.list.querySelector<HTMLTextAreaElement>('.reply textarea')?.focus();
       }
@@ -314,7 +380,10 @@ export class TaskBoardPanel {
     });
     this.list.addEventListener('input', (e) => {
       const area = e.target as HTMLTextAreaElement;
-      if (this.reply && area.matches('.reply textarea')) this.reply.draft = area.value;
+      if (this.reply && area.matches('.reply textarea')) {
+        this.reply.draft = area.value;
+        if (this.selected) this.drafts.set(this.selected, this.reply);
+      }
     });
     this.list.addEventListener('keydown', (e) => {
       // Ctrl+Enter sends the reply, like in a chat.
@@ -337,6 +406,7 @@ export class TaskBoardPanel {
     }
     r.pending = requestId;
     r.error = undefined;
+    if (this.selected) this.drafts.set(this.selected, r);
     this.renderList();
   }
 
@@ -344,7 +414,7 @@ export class TaskBoardPanel {
   private replyForm(t: Task): string {
     const r = this.reply!;
     const seg = (value: Access, label: string) =>
-      `<button type="button" data-act="reply-access" data-value="${value}" class="${r.access === value ? 'on' : ''}">${label}</button>`;
+      `<button type="button" data-act="reply-access" data-value="${value}" ${r.pending ? 'disabled' : ''} class="${r.access === value ? 'on' : ''}">${label}</button>`;
     return `<div class="reply">
       <textarea rows="3" placeholder="Ответ агенту: он продолжит разговор и помнит задачу. Ctrl+Enter — отправить" ${r.pending ? 'disabled' : ''}>${esc(r.draft)}</textarea>
       <div class="seg">${seg('read', 'Только чтение')}${seg('write', 'Может править')}</div>
@@ -578,44 +648,57 @@ export class TaskBoardPanel {
   }
 
   private renderList(): void {
-    // Re-rendering replaces the reply box: keep its focus and caret.
-    const area = this.list.querySelector<HTMLTextAreaElement>('.reply textarea');
-    const focus = area && document.activeElement === area ? { start: area.selectionStart, end: area.selectionEnd } : undefined;
-    this.renderTasks();
-    const next = this.list.querySelector<HTMLTextAreaElement>('.reply textarea');
-    if (focus && next) {
-      next.focus();
-      next.setSelectionRange(focus.start, focus.end);
+    const groups = conversations(this.tasks);
+    if (!this.selected || !groups.some((c) => c.id === this.selected)) this.selected = groups[0]?.id;
+    this.form.hidden = !this.composing && !!groups.length;
+    this.list.hidden = this.composing;
+    const nav = this.list.querySelector<HTMLElement>('.conversation-list')!;
+    nav.hidden = !this.browsing;
+    this.el.querySelector<HTMLInputElement>('.conversation-search')!.hidden = !this.browsing || this.composing;
+    const navHtml = groups.filter((c) => !this.search || c.turns.some((t) => `${t.prompt} ${t.cwd} ${t.executor}`.toLocaleLowerCase().includes(this.search))).map((c) => {
+      const first = c.turns[0], last = c.turns.at(-1)!;
+      const status = c.turns.find(isLive) ?? last;
+      return `<button type="button" data-act="thread" data-id="${esc(c.id)}" class="thread-row ${this.selected === c.id ? 'selected' : ''}" aria-pressed="${this.selected === c.id}"><span class="thread-title">${esc(first.prompt)}</span><span class="thread-meta">${EXECUTOR[last.executor]} · ${esc(base(first.cwd))} · ${c.turns.length} ход.</span><span class="chip ${status.status}">${STATUS[status.status]}</span></button>`;
+    }).join('') || '<p class="empty">Разговоры не найдены</p>';
+    if (nav.innerHTML !== navHtml) nav.innerHTML = navHtml;
+    const conversation = this.list.querySelector<HTMLElement>('.conversation')!;
+    const group = groups.find((c) => c.id === this.selected);
+    conversation.hidden = !group || this.browsing;
+    if (!group || this.browsing) return;
+    const last = group.turns.at(-1)!;
+    const active = group.turns.find(isLive);
+    const head = this.list.querySelector<HTMLElement>('.conversation-head')!;
+    const headHtml = `<span>${EXECUTOR[last.executor]} · ${esc(base(last.cwd))} · ${STATUS[(active ?? last).status]}</span><button type="button" data-act="bottom">↓ К последним</button>`;
+    if (head.innerHTML !== headHtml) head.innerHTML = headHtml;
+    const messages = this.list.querySelector<HTMLElement>('.messages')!;
+    const html = group.turns.map((t) => `<article class="conversation-turn" data-turn="${esc(t.id)}">
+      <div class="message user"><div class="message-label">Вы · ${new Date(t.createdAt).toLocaleString()}${t.continues ? ' · продолжение' : ''}</div><div class="message-body">${messageHtml(t.prompt)}</div></div>
+      <div class="message assistant"><div class="message-label">${EXECUTOR[t.executor]} · ${esc(t.model)} · ${STATUS[t.status]}</div><div class="message-body">${t.result ? messageHtml(t.result) : isLive(t) ? 'Агент работает…' : 'Ответ отсутствует'}</div>
+      <div class="task-actions">${t.result ? `<button type="button" data-act="copy" data-id="${esc(t.id)}">Копировать</button>` : ''}${t.agentId && this.known.has(t.agentId) ? `<button type="button" data-act="show" data-id="${esc(t.agentId)}">В офисе</button>` : ''}${isLive(t) ? `<button type="button" data-act="cancel" data-id="${esc(t.id)}">Отменить</button>` : t.agentId && !active && !t.orphans ? `<button type="button" data-act="reply" data-id="${esc(t.id)}">Ответить на этот ход</button>` : ''}</div></div></article>`).join('');
+    const key = group.id + html;
+    if (key !== this.messagesKey) {
+      const same = this.messagesKey.startsWith(group.id + '<');
+      const bottom = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 60;
+      const top = messages.scrollTop;
+      const missing = group.turns.some((t) => t.continues && !this.tasks.some((p) => p.id === t.continues));
+      messages.innerHTML = (missing ? '<p class="note">Ранние сообщения этого разговора больше не хранятся в истории.</p>' : '') + html;
+      messages.scrollTop = same ? (bottom ? messages.scrollHeight : top) : (this.scrolls.get(group.id) ?? messages.scrollHeight);
+      this.messagesKey = key;
     }
-  }
-
-  private renderTasks(): void {
-    const models = new Map<string, string>();
-    for (const ex of Object.values(this.config?.executors ?? {})) for (const m of ex.models) models.set(m.id, m.label);
-    if (!this.tasks.length) {
-      this.list.innerHTML = '<p class="empty">Задач пока нет. Напишите первую — работник придёт в офис через дверь.</p>';
-      return;
+    const composer = this.list.querySelector<HTMLElement>('.composer')!;
+    if (!this.reply || !group.turns.some((t) => t.id === this.reply!.taskId)) {
+      this.reply = this.drafts.get(group.id) ?? { taskId: last.id, draft: '', access: last.access };
     }
-    this.list.innerHTML = this.tasks
-      .map((t) => {
-        const live = t.status === 'starting' || t.status === 'running' || t.status === 'cancelling';
-        const show = t.agentId && this.known.has(t.agentId);
-        return `<div class="task ${t.status}">
-          <div class="task-head">
-            <span class="chip ${t.status}">${STATUS[t.status]}</span>
-            <span class="who">${EXECUTOR[t.executor]} · ${esc(models.get(t.model) ?? t.model)}${t.effort ? ' · ' + esc(t.effort) : ''}</span>
-          </div>
-          <div class="task-prompt">${esc(t.prompt)}</div>
-          <div class="meta dim">${t.continues ? '↪ ответ в той же сессии · ' : ''}📁 ${esc(base(t.cwd))} · ${t.access === 'write' ? 'может править' : 'только чтение'}${t.outsideGit ? ' · вне Git' : ''} · ${new Date(t.createdAt).toLocaleTimeString()}</div>
-          ${t.result ? `<details><summary>${t.status === 'failed' ? 'Ошибка' : 'Ответ'}</summary><div class="task-result">${esc(t.result)}</div></details>` : ''}
-          <div class="task-actions">
-            ${show ? `<button type="button" data-act="show" data-id="${esc(t.agentId!)}">Показать в офисе</button>` : ''}
-            ${live ? `<button type="button" data-act="cancel" data-id="${esc(t.id)}">${t.status === 'cancelling' ? 'Отменить ещё раз' : 'Отменить'}</button>` : ''}
-            ${!live && t.agentId ? `<button type="button" data-act="reply" data-id="${esc(t.id)}" aria-expanded="${this.reply?.taskId === t.id}">${this.reply?.taskId === t.id ? 'Скрыть ответ' : 'Ответить'}</button>` : ''}
-          </div>
-          ${this.reply?.taskId === t.id && !live ? this.replyForm(t) : ''}
-        </div>`;
-      })
-      .join('');
+    const target = group.turns.find((t) => t.id === this.reply?.taskId) ?? last;
+    const canReply = !active && !!target.agentId && !target.orphans;
+    const composerKey = JSON.stringify([group.id, target.id, canReply, this.reply.access, this.reply.pending, this.reply.error]);
+    if (composerKey !== this.composerKey) {
+      const area = composer.querySelector<HTMLTextAreaElement>('textarea');
+      const focus = area && document.activeElement === area ? [area.selectionStart, area.selectionEnd] : undefined;
+      composer.innerHTML = canReply ? `<div class="reply-context">Ответ ${EXECUTOR[target.executor]}${target.id !== last.id ? ' на выбранный ход' : ''} · Ctrl+Enter</div>${this.replyForm(target)}` : `<p class="note">${active ? 'Ответить можно после завершения текущего хода.' : target.orphans ? 'Отмена не подтверждена: продолжение пока недоступно.' : 'У этой задачи нет сессии для продолжения.'}</p>`;
+      const next = composer.querySelector<HTMLTextAreaElement>('textarea');
+      if (focus && next) { next.focus({ preventScroll: true }); next.setSelectionRange(focus[0], focus[1]); }
+      this.composerKey = composerKey;
+    }
   }
 }

@@ -5,6 +5,7 @@ import { iso } from './iso';
 import { DESKS, DOOR, HOME, H, W, SPOTS, ZONE_OF, type Desk, type Tile } from './layout';
 import { drawBoard, type Scene } from './scene';
 import { box, depth } from './iso';
+import { OfficeResidents } from './residents';
 
 const SCREEN = { off: 0x1b2330, think: 0x3b82f6, write: 0x22c55e, wait: 0xf59e0b };
 
@@ -30,10 +31,12 @@ export class Office {
   private parcelY = 0;
   private reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
   private running = -1;
+  readonly residents: OfficeResidents;
 
   constructor(world: Container, scene: Scene) {
     this.world = world;
     this.scene = scene;
+    this.residents = new OfficeResidents(world);
     this.links.zIndex = 99999;
     world.addChild(this.links);
     for (const { desk } of scene.desks) {
@@ -124,6 +127,7 @@ export class Office {
 
   /** Far away plates show only icons, closer the title, close up the model too. */
   setZoom(zoom: number): void {
+    this.residents.setZoom(zoom);
     this.detail = zoom < 0.6 ? 'icon' : zoom < 1.05 ? 'name' : 'full';
     for (const a of this.agents.values()) a.setDetail(this.detail);
   }
@@ -184,6 +188,7 @@ export class Office {
 
   update(dt: number): void {
     this.t += dt;
+    this.residents.update(dt, [...this.agents.values()].filter((a) => !a.leaving).map((a) => a.pos));
     if (this.parcel.visible) this.parcel.y = this.parcelY - (this.reducedMotion.matches ? 0 : Math.sin(this.t * 2) * 3);
     const now = performance.now();
     for (const [id, until] of this.meetings) {

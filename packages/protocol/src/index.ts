@@ -87,7 +87,7 @@ export interface Task {
   finishedAt?: number;
   /** Office agent that works on the task, once its transcript is known. */
   agentId?: string;
-  /** Final answer, or the error that stopped the run (trimmed). */
+  /** Final answer, or the error that stopped the run (within the CLI capture limit). */
   result?: string;
   /** This task continues an earlier one in the same agent session (a reply to the agent). */
   continues?: string;

@@ -87,6 +87,7 @@ const board = new TaskBoardPanel(sidebar.tasksPane, (m) => send(m), (id) => {
   sidebar.show('office');
   if (selected !== id) select(id);
 });
+sidebar.onConversation = (id) => { board.openForAgent(id); sidebar.show('tasks'); };
 const meeting = new MeetingPanel(sidebar.teamPane, (m) => send(m), (id) => {
   sidebar.show('office');
   if (selected !== id) select(id);

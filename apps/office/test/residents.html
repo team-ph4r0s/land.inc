@@ -1,0 +1,13 @@
+<!doctype html><html lang="ru"><meta charset="utf-8"><title>Жители офиса — просмотр анимаций</title>
+<style>body{margin:0;background:#eeede7;color:#25352e;font:15px system-ui}header{padding:18px}button{padding:10px;margin:5px;font:inherit}canvas{display:block}</style>
+<header><strong>Макс, Расул и Ваня · без ИИ</strong><p>Просмотр внешности и реквизита в крупном масштабе.</p><button data-mode="normal">Самокат, рожицы, гантеля</button><button data-mode="fun">Неловкость и реакции</button><button data-mode="hello">Приветствие</button></header>
+<script type="module">
+import { Application, Container } from 'pixi.js';
+import { OfficeResidents } from '/src/residents.ts';
+const app=new Application();await app.init({width:1000,height:430,background:'#eeede7',antialias:true,resolution:devicePixelRatio,autoDensity:true});document.body.append(app.canvas);
+const world=new Container({sortableChildren:true});world.scale.set(2);world.position.set(220,230);app.stage.addChild(world);
+const residents=new OfficeResidents(world);residents.setZoom(2);
+const poses={normal:['scooter','faces','dumbbell'],fun:['laugh','stumble','flex'],hello:['wave','wave','wave']};
+let mode='normal';document.querySelectorAll('button').forEach(b=>b.onclick=()=>{mode=b.dataset.mode;residents.life.people.forEach(r=>r.age=0);});
+app.ticker.add(t=>{residents.life.people.forEach((r,i)=>Object.assign(r,{x:i*2,y:-i*2,action:poses[mode][i],text:['Макс: лысый самокатчик','Расул: шутник и растяпа','Ваня: очки и карманная гантеля'][i],remaining:999,path:[],age:r.age+t.deltaMS/1000}));residents.update(0,[]);});
+</script></html>
