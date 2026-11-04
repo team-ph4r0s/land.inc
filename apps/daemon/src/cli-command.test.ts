@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cliCommand, cliOnPath } from './executors/files.ts';
@@ -52,7 +52,11 @@ test('Windows PATH search skips unlaunchable entries and finds a later npm insta
     // unrelated toolchain directories and network entries.
     process.env.PATH = `${first};${second};${join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')}`;
     assert.equal(cliCommand(join(first, 'land-test-cli.cmd'), 'land-test-cli', '@test/cli'), undefined);
-    assert.deepEqual(cliOnPath('land-test-cli', '@test/cli'), { command: process.execPath, args: [join(pkg, 'cli.js')] });
+    const cmd = cliOnPath('land-test-cli', '@test/cli')!;
+    assert.equal(cmd.command, process.execPath);
+    assert.equal(cmd.args.length, 1);
+    // where.exe expands Windows 8.3 names (RUNNER~1) to runneradmin.
+    assert.equal(realpathSync.native(cmd.args[0]), realpathSync.native(join(pkg, 'cli.js')));
   } finally {
     if (oldPath === undefined) delete process.env.PATH;
     else process.env.PATH = oldPath;
