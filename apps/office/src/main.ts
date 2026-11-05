@@ -11,6 +11,7 @@ import { TaskBoardPanel } from './board';
 import { MeetingPanel } from './meeting';
 import { DnsPanel } from './dns';
 import { UpdatePanel } from './updates';
+import { AgentStudioPanel } from './studio';
 import './style.css';
 
 const stage = document.getElementById('stage')!;
@@ -94,6 +95,7 @@ const meeting = new MeetingPanel(sidebar.teamPane, (m) => send(m), (id) => {
 });
 const dns = new DnsPanel(sidebar.dnsPane, (m) => send(m));
 const updatePanel = new UpdatePanel(sidebar.updatesPane, (m) => send(m));
+const studio = new AgentStudioPanel(sidebar.studioPane, (m) => send(m));
 document.getElementById('office-version')!.addEventListener('click', () => sidebar.show('updates'));
 office.onUpdate = () => sidebar.show('updates');
 let installedVersion: string | undefined;
@@ -139,6 +141,16 @@ send = connect(
         meeting.setModels(Object.values(m.config.executors).flatMap((e) => e.models));
         syncBoard();
         return;
+      case 'mcp:status':
+        board.setMcpStatuses(m.statuses);
+        return;
+      case 'mcp:install:complete':
+        board.setMcpStatuses(m.statuses);
+        return;
+      case 'agents':
+      case 'agent':
+        studio.receive(m);
+        return;
       case 'collabs':
         meeting.setAll(m.collabs);
         office.setCollabs(m.collabs);
@@ -152,6 +164,9 @@ send = connect(
       case 'task':
         board.upsert(m.task);
         syncBoard();
+        return;
+      case 'task:stream:chunk':
+        board.streamChunk(m.taskId, m.chunk);
         return;
       case 'error':
         board.showError(m.message);
@@ -202,6 +217,15 @@ app.ticker.add((t) => {
   office.update(dt);
   campus.update(dt);
 });
+
+const setAdaptiveFps = (reduced: boolean) => { app.ticker.maxFPS = reduced ? 15 : 60; };
+document.addEventListener('visibilitychange', () => setAdaptiveFps(document.hidden));
+window.addEventListener('focusin', (event) => {
+  const target = event.target as HTMLElement;
+  if (target.matches('input, textarea, [contenteditable="true"]')) setAdaptiveFps(true);
+});
+window.addEventListener('focusout', () => { if (!document.hidden) setAdaptiveFps(false); });
+setAdaptiveFps(document.hidden);
 
 // Camera: drag to pan, wheel or buttons to zoom, double-click or ⤢ to fit.
 let zoom = 1;

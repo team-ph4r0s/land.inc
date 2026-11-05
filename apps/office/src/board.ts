@@ -1,4 +1,4 @@
-import type { Access, BoardConfig, ClientMessage, Executor, ModelOption, Task } from '@land/protocol';
+import type { Access, BoardConfig, ClientMessage, Executor, McpStatus, ModelOption, Task } from '@land/protocol';
 import { conversations, isLive, messageHtml } from './conversations';
 
 const STATUS: Record<Task['status'], string> = {
@@ -64,6 +64,7 @@ export class TaskBoardPanel {
   private scrolls = new Map<string, number>();
   private messagesKey = '';
   private composerKey = '';
+  private mcpStatuses: McpStatus[] = [];
   /**
    * The reply form under a finished task. The list re-renders on every update, so what
    * the user typed lives here and is put back each time.
@@ -101,6 +102,11 @@ export class TaskBoardPanel {
     this.renderList();
   }
 
+  setMcpStatuses(statuses: McpStatus[]): void {
+    this.mcpStatuses = statuses.map((status) => ({ ...status }));
+    this.renderMcpBanner();
+  }
+
   upsert(task: Task): void {
     const i = this.tasks.findIndex((t) => t.id === task.id);
     if (i >= 0) this.tasks[i] = task;
@@ -110,6 +116,15 @@ export class TaskBoardPanel {
       this.composing = false;
       this.browsing = false;
     }
+    this.renderList();
+  }
+
+  streamChunk(taskId: string, chunk: string): void {
+    const index = this.tasks.findIndex((task) => task.id === taskId);
+    if (index < 0) return;
+    const task = this.tasks[index];
+    const result = `${task.result ?? ''}${chunk}`.slice(-200_000);
+    this.tasks = this.tasks.map((item, itemIndex) => itemIndex === index ? { ...item, result } : item);
     this.renderList();
   }
 
@@ -190,6 +205,7 @@ export class TaskBoardPanel {
 
   private build(): void {
     this.el.innerHTML = `
+      <div class="mcp-banner" data-mcp-banner hidden></div>
       <form class="task-form">
         <label>Проект
           <select name="project"></select>
@@ -259,8 +275,16 @@ export class TaskBoardPanel {
     this.form = this.el.querySelector('form')!;
     this.list = this.el.querySelector('.tasks')!;
     this.error = this.el.querySelector('.error')!;
+    this.el.querySelector<HTMLElement>('[data-mcp-banner]')!.addEventListener('click', (event) => {
+      const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-mcp-install]');
+      if (!button) return;
+      const selected = button.dataset.mcpInstall;
+      const missing = selected ? [selected as McpStatus['name']] : this.mcpStatuses.filter((status) => status.status !== 'installed').map((status) => status.name);
+      if (missing.length) this.send({ type: 'mcp.install', request: { servers: missing } });
+    });
     this.form.insertAdjacentHTML('beforebegin', '<div class="board-toolbar"><button type="button" data-browse>☰ Разговоры</button><button type="button" data-new>＋ Новая задача</button></div><input class="conversation-search" type="search" placeholder="Найти разговор…" aria-label="Поиск разговоров" />');
     this.list.innerHTML = '<div class="conversation-list" aria-label="Разговоры"></div><section class="conversation"><div class="conversation-head"></div><div class="messages" tabindex="0" aria-label="История разговора"></div><div class="composer"></div></section>';
+    this.renderMcpBanner();
     this.el.querySelector('[data-new]')!.addEventListener('click', () => {
       this.composing = !this.composing;
       this.renderList();
@@ -357,6 +381,17 @@ export class TaskBoardPanel {
       if (b.dataset.act === 'copy') {
         const task = this.tasks.find((t) => t.id === b.dataset.id);
         if (task?.result) void navigator.clipboard.writeText(task.result).then(() => { b.textContent = 'Скопировано'; }, () => { b.textContent = 'Выделите текст для копирования'; });
+      }
+      if (b.dataset.act === 'download') {
+        const task = this.tasks.find((t) => t.id === b.dataset.id);
+        if (task?.result) {
+          const url = URL.createObjectURL(new Blob([task.result], { type: 'text/markdown;charset=utf-8' }));
+          const link = document.createElement('a'); link.href = url; link.download = `${base(task.cwd)}-${task.id}.md`; link.click(); URL.revokeObjectURL(url);
+        }
+      }
+      if (b.dataset.act === 'save') {
+        const path = window.prompt('Относительный путь внутри проекта', 'artifacts/result.md')?.trim();
+        if (path) this.send({ type: 'artifact.save', taskId: b.dataset.id!, path, format: 'md', requestId: crypto.randomUUID() });
       }
       if (b.dataset.act === 'cancel') this.send({ type: 'task.cancel', id: b.dataset.id! });
       if (b.dataset.act === 'bottom') {
@@ -674,7 +709,7 @@ export class TaskBoardPanel {
     const html = group.turns.map((t) => `<article class="conversation-turn" data-turn="${esc(t.id)}">
       <div class="message user"><div class="message-label">Вы · ${new Date(t.createdAt).toLocaleString()}${t.continues ? ' · продолжение' : ''}</div><div class="message-body">${messageHtml(t.prompt)}</div></div>
       <div class="message assistant"><div class="message-label">${EXECUTOR[t.executor]} · ${esc(t.model)} · ${STATUS[t.status]}</div><div class="message-body">${t.result ? messageHtml(t.result) : isLive(t) ? 'Агент работает…' : 'Ответ отсутствует'}</div>
-      <div class="task-actions">${t.result ? `<button type="button" data-act="copy" data-id="${esc(t.id)}">Копировать</button>` : ''}${t.agentId && this.known.has(t.agentId) ? `<button type="button" data-act="show" data-id="${esc(t.agentId)}">В офисе</button>` : ''}${isLive(t) ? `<button type="button" data-act="cancel" data-id="${esc(t.id)}">Отменить</button>` : t.agentId && !active && !t.orphans ? `<button type="button" data-act="reply" data-id="${esc(t.id)}">Ответить на этот ход</button>` : ''}</div></div></article>`).join('');
+      <div class="task-actions">${t.result ? `<button type="button" data-act="copy" data-id="${esc(t.id)}">Копировать</button><button type="button" data-act="download" data-id="${esc(t.id)}">Скачать .md</button><button type="button" data-act="save" data-id="${esc(t.id)}">Сохранить в проект…</button>` : ''}${t.agentId && this.known.has(t.agentId) ? `<button type="button" data-act="show" data-id="${esc(t.agentId)}">В офисе</button>` : ''}${isLive(t) ? `<button type="button" data-act="cancel" data-id="${esc(t.id)}">Отменить</button>` : t.agentId && !active && !t.orphans ? `<button type="button" data-act="reply" data-id="${esc(t.id)}">Ответить на этот ход</button>` : ''}</div></div></article>`).join('');
     const key = group.id + html;
     if (key !== this.messagesKey) {
       const same = this.messagesKey.startsWith(group.id + '<');
@@ -700,5 +735,14 @@ export class TaskBoardPanel {
       if (focus && next) { next.focus({ preventScroll: true }); next.setSelectionRange(focus[0], focus[1]); }
       this.composerKey = composerKey;
     }
+  }
+
+  private renderMcpBanner(): void {
+    const banner = this.el.querySelector<HTMLElement>('[data-mcp-banner]');
+    if (!banner) return;
+    const missing = this.mcpStatuses.filter((status) => status.status !== 'installed');
+    banner.hidden = missing.length === 0;
+    if (!missing.length) return;
+    banner.innerHTML = `<strong>⚠️ Не установлены обязательные MCP (${missing.length} из 4)</strong><span>${missing.map((status) => `${esc(status.name)}: ${esc(status.status)} <button type="button" data-mcp-install="${esc(status.name)}">Установить</button>`).join(' · ')}</span><button type="button" data-mcp-install>Установить все недостающие MCP</button>`;
   }
 }

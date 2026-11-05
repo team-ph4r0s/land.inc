@@ -111,13 +111,15 @@ export class UpdatesService {
         release = { version: next, tag: `v${next}`, sha: 'a'.repeat(40), url: 'https://github.com/ghostoftheeleven/land.inc/releases', notes: 'Демонстрация доставки обновления. Код и зависимости не меняются.' };
       } else {
         const repo = githubRepo(await this.runner('git', ['remote', 'get-url', 'origin'], this.root));
-        let data: any;
+        let data: Record<string, unknown>;
         try { data = JSON.parse(await this.runner('gh', ['api', `repos/${repo}/releases/latest`], this.root)); }
         catch {
           const response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, { headers: { Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(15_000) });
           if (response.status === 404) throw new Error('Опубликованных релизов нет или репозиторий закрыт. Для закрытого репозитория выполните gh auth login');
           if (!response.ok) throw new Error(`GitHub недоступен (${response.status}). Повторите позже`);
-          data = await response.json();
+          const payload: unknown = await response.json();
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Некорректный ответ GitHub');
+          data = payload as Record<string, unknown>;
         }
         const next = typeof data.tag_name === 'string' ? data.tag_name.replace(/^v/, '') : '';
         if (!validVersion(next) || data.draft || data.prerelease) throw new Error('Последний релиз не соответствует формату x.y');

@@ -1,9 +1,10 @@
 import { createServer, type IncomingMessage } from 'node:http';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import { readdirSync, statSync } from 'node:fs';
+import { chmodSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { parse as parseUrl } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { DAEMON_PORT, type ClientMessage, type ServerMessage } from '@land/protocol';
+import { DAEMON_PORT, assertClientMessage, type ClientMessage, type ServerMessage } from '@land/protocol';
 import { Store } from './store.ts';
 import { ClaudeAdapter } from './adapters/claude.ts';
 import { AntigravityAdapter } from './adapters/antigravity.ts';
@@ -15,10 +16,29 @@ import { createTeamCoordinator } from './team.ts';
 import { fakeExecutors } from './fake-executors.ts';
 import { DnsService, FakeDnsBackend } from './dns.ts';
 import { UpdatesService } from './updates.ts';
+import { McpManager } from './executors/mcp-manager.ts';
+import { createSessionToken, authorizeRequest, sanitizeWorkspacePath } from './security/shield.ts';
+import { AgentRegistry } from './agents/registry.ts';
 
 const args = process.argv.slice(2);
 const port = Number(process.env.LAND_PORT ?? DAEMON_PORT);
 const store = new Store();
+const sessionToken = createSessionToken();
+const mcp = new McpManager();
+const agents = new AgentRegistry();
+const MAX_HOOK_BODY = 256 * 1024;
+
+function persistSessionToken(token: string): void {
+  const path = process.env.LAND_TOKEN_FILE ?? join(homedir(), '.land', 'daemon.token');
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, `${token}\n`, { encoding: 'utf8', mode: 0o600 });
+    chmodSync(path, 0o600);
+  } catch (error) {
+    console.warn(`[land] не удалось сохранить токен сессии: ${(error as Error).message}`);
+  }
+}
+persistSessionToken(sessionToken);
 
 if (args.includes('--demo')) startDemo(store);
 if (!args.includes('--no-real')) {
@@ -41,12 +61,16 @@ const team = createTeamCoordinator(
 );
 const updates = new UpdatesService((state) => broadcast({ type: 'updates', state }),
   () => !dns.changing && !board.list().some((t) => ['starting', 'running', 'cancelling'].includes(t.status)) && !team.list().some((t) => ['running', 'stopping'].includes(t.status)), { fake });
-process.on('message', (message: any) => {
-  if (message?.type === 'office.update.status') updates.set(message.patch);
+process.on('message', (message: unknown) => {
+  if (isRecord(message) && message.type === 'office.update.status' && isRecord(message.patch)) updates.set(message.patch as Parameters<UpdatesService['set']>[0]);
 });
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 /**
- * Transcripts are private. The daemon only listens on loopback, but any web page
+ * Transcripts are private. The daemon only listens on loopback, but a web page
  * open in the browser could still reach it, so browser requests must come from
  * a local origin (the office client). Hooks and curl send no Origin header.
  */
@@ -58,28 +82,45 @@ function allowedOrigin(origin: string | undefined): boolean {
 }
 
 const server = createServer((req, res) => {
+  const url = parseUrl(req.url ?? '/', true);
+  const queryToken = typeof url.query.token === 'string' ? url.query.token : undefined;
+  const requestHeaders = queryToken ? { ...req.headers, 'x-land-token': queryToken } : req.headers;
+  const secureHeaders = { 'content-security-policy': "default-src 'none'; frame-ancestors 'none'", 'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY' };
+  const respond = (status: number, headers: Record<string, string> = {}) => res.writeHead(status, { ...secureHeaders, ...headers });
   if (req.headers.host !== `127.0.0.1:${port}` || !allowedOrigin(req.headers.origin)) {
-    res.writeHead(403).end();
+    respond(403).end();
     return;
   }
-  if (req.method === 'POST' && req.url === '/hook') {
+  if (req.method === 'POST' && url.pathname === '/hook') {
+    if (!authorizeRequest(requestHeaders, sessionToken, `127.0.0.1:${port}`)) { respond(403).end(); return; }
     let body = '';
-    req.on('data', (c) => (body += c));
+    let size = 0;
+    let rejected = false;
+    req.on('data', (c) => {
+      if (rejected) return;
+      size += Buffer.byteLength(c);
+      if (size > MAX_HOOK_BODY) { rejected = true; req.destroy(); respond(413).end(); return; }
+      body += c;
+    });
     req.on('end', () => {
+      if (rejected) return;
       try {
-        onClaudeHook(JSON.parse(body));
+        const payload: unknown = JSON.parse(body);
+        if (!isRecord(payload)) throw new Error('Некорректный hook payload');
+        onClaudeHook(payload);
       } catch {
         // Hooks must never fail the agent; ignore bad payloads.
       }
-      res.writeHead(204).end();
+      respond(204).end();
     });
     return;
   }
-  if (req.method === 'GET' && req.url === '/health') {
-    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ version: updates.state.current, pid: process.pid }));
+  if (req.method === 'GET' && url.pathname === '/health') {
+    respond(200, { 'content-type': 'application/json', 'access-control-allow-origin': req.headers.origin ?? '*' }).end(JSON.stringify({ version: updates.state.current, pid: process.pid, token: sessionToken }));
     return;
   }
-  res.writeHead(200, { 'content-type': 'application/json' });
+  if (!authorizeRequest(requestHeaders, sessionToken, `127.0.0.1:${port}`)) { respond(403).end(); return; }
+  respond(200, { 'content-type': 'application/json' });
   res.end(JSON.stringify(store.snapshot()));
 });
 
@@ -87,26 +128,31 @@ const server = createServer((req, res) => {
  * Optional Claude Code hooks (see README) give instant signals the transcript
  * cannot: above all `Notification`, sent when Claude needs a permission or an answer.
  */
-function onClaudeHook(h: Record<string, any>): void {
-  const id = h.session_id;
+function onClaudeHook(h: Record<string, unknown>): void {
+  const text = (value: unknown, fallback = ''): string => typeof value === 'string' ? value : fallback;
+  const id = text(h.session_id);
   if (typeof id !== 'string') return;
   const now = Date.now();
   // Only notifications that ask the user for something change the office; ignoring the
   // rest before creating the agent keeps informational hooks from spawning anyone.
-  if (h.hook_event_name === 'Notification' && !needsUser(h)) return;
+  const event = text(h.hook_event_name);
+  if (event === 'Notification' && !needsUser(h)) return;
   if (!store.has(id)) {
-    store.update(id, { source: 'claude', cwd: h.cwd ?? '', project: h.cwd ? basename(h.cwd) : '' }, now);
+    const cwd = text(h.cwd);
+    store.update(id, { source: 'claude', cwd, project: cwd ? basename(cwd) : '' }, now);
   }
-  switch (h.hook_event_name) {
+  switch (event) {
     case 'Notification':
-      store.waiting(id, h.message ?? 'Ждёт вас', now);
+      store.waiting(id, text(h.message, 'Ждёт вас'), now);
       break;
     case 'UserPromptSubmit':
       store.newTurn(id, 'Читает задачу', now);
       break;
     case 'PreToolUse': {
-      const { activity, detail, test } = describeTool(h.tool_name ?? 'tool', h.tool_input ?? {});
-      store.tool(id, h.tool_name ?? 'tool', activity, detail, now, test);
+      const tool = text(h.tool_name, 'tool');
+      const input = isRecord(h.tool_input) ? h.tool_input : {};
+      const { activity, detail, test } = describeTool(tool, input);
+      store.tool(id, tool, activity, detail, now, test);
       break;
     }
     case 'PostToolUse':
@@ -121,8 +167,10 @@ function onClaudeHook(h: Record<string, any>): void {
   }
 }
 
-const wss = new WebSocketServer({ server, maxPayload: 64 * 1024, verifyClient: ({ origin, req }: { origin: string; req: IncomingMessage }) =>
-  req.headers.host === `127.0.0.1:${port}` && !!origin && allowedOrigin(origin) });
+const wss = new WebSocketServer({ server, maxPayload: 64 * 1024, verifyClient: ({ origin, req }: { origin: string; req: IncomingMessage }) => {
+  const token = typeof req.headers['x-land-token'] === 'string' ? req.headers['x-land-token'] : new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('token') ?? undefined;
+  return req.headers.host === `127.0.0.1:${port}` && !!origin && allowedOrigin(origin) && authorizeRequest({ ...req.headers, 'x-land-token': token }, sessionToken, `127.0.0.1:${port}`);
+} });
 const clients = new Set<WebSocket>();
 const send = (ws: WebSocket, msg: ServerMessage) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(msg));
 const broadcast = (msg: ServerMessage) => {
@@ -131,23 +179,54 @@ const broadcast = (msg: ServerMessage) => {
   for (const ws of clients) if (ws.readyState === ws.OPEN) ws.send(data);
 };
 
+setTimeout(() => void mcp.audit().then((statuses) => broadcast({ type: 'mcp:status', statuses })), 0).unref();
+
 wss.on('connection', (ws) => {
   clients.add(ws);
+  send(ws, { type: 'security.session', token: sessionToken });
+  send(ws, { type: 'agents', agents: agents.list() });
   send(ws, store.snapshot());
   send(ws, { type: 'board', config: board.config(), tasks: board.list() });
   send(ws, { type: 'collabs', collabs: team.list() });
   send(ws, { type: 'updates', state: updates.state });
+  void mcp.audit().then((statuses) => send(ws, { type: 'mcp:status', statuses }));
   ws.on('message', async (raw) => {
     // Only the office client (an allowed origin, see verifyClient) can start tasks.
     let msg: ClientMessage;
     try {
-      msg = JSON.parse(String(raw));
+      msg = assertClientMessage(JSON.parse(String(raw)));
     } catch {
       return send(ws, { type: 'error', message: 'Некорректное сообщение' });
     }
     try {
       if (updates.busy && ['task.create', 'task.reply', 'team.create'].includes(msg.type)) throw new Error('Офис обновляется. Дождитесь завершения');
-      if (msg.type === 'updates.check') await updates.check();
+      if (msg.type === 'agents.list') send(ws, { type: 'agents', agents: agents.list() });
+      else if (msg.type === 'agent.create') {
+        const agent = agents.create(msg.agent);
+        const event = { type: 'agent:created' as const, agent };
+        broadcast({ type: 'agent', event });
+      } else if (msg.type === 'agent.update') {
+        const agent = agents.update(msg.id, msg.patch);
+        broadcast({ type: 'agent', event: { type: 'agent:updated', agent } });
+      } else if (msg.type === 'agent.clone') {
+        const agent = agents.clone(msg.id, msg.name);
+        broadcast({ type: 'agent', event: { type: 'agent:created', agent } });
+      } else if (msg.type === 'agent.delete') {
+        agents.remove(msg.id);
+        broadcast({ type: 'agent', event: { type: 'agent:deleted', id: msg.id } });
+      } else if (msg.type === 'mcp.audit') send(ws, { type: 'mcp:status', statuses: await mcp.audit() });
+      else if (msg.type === 'mcp.install') {
+        const statuses = await mcp.install(msg.request, (name, progress, message) => broadcast({ type: 'mcp:install:progress', name, progress, message }));
+        broadcast({ type: 'mcp:install:complete', statuses });
+      } else if (msg.type === 'artifact.save') {
+        if (!msg.requestId || msg.path.length > 400) throw new Error('Некорректный путь артефакта');
+        const task = board.get(msg.taskId);
+        if (!task) throw new Error('Задача не найдена');
+        const path = sanitizeWorkspacePath(resolve(task.cwd, msg.path), task.cwd);
+        const text = board.fullResult(task.id) ?? task.result ?? '';
+        writeFileSync(path, msg.format === 'txt' ? text.replace(/```[a-z]*\n?/gi, '') : text, 'utf8');
+        send(ws, { type: 'artifact:saved', requestId: msg.requestId, path });
+      } else if (msg.type === 'updates.check') await updates.check();
       else if (msg.type === 'updates.install') await updates.install(msg.version, msg.sha);
       else if (msg.type === 'dns.read' || msg.type === 'dns.test' || msg.type === 'dns.apply' || msg.type === 'dns.restore') {
         if (typeof msg.requestId !== 'string' || msg.requestId.length > 100) throw new Error('Некорректный запрос DNS');
@@ -181,7 +260,14 @@ wss.on('connection', (ws) => {
         if (msg.requestId) send(ws, { type: 'task.accepted', requestId: msg.requestId });
         broadcast({ type: 'board', config: board.config(), tasks: board.list() });
       } else if (msg.type === 'team.create') {
-        team.startTeam(msg.task, msg.colleague, msg.planner);
+        if (msg.pipeline) {
+          const stages = msg.pipeline.stages.toSorted((a, b) => a.order - b.order);
+          const profiles = stages.map((stage) => agents.get(stage.agentId));
+          if (!profiles.length || profiles.some((profile) => !profile)) throw new Error('В pipeline есть неизвестный агент');
+          const first = profiles[0]!;
+          const participants = profiles.slice(1).map((profile, index) => ({ executor: profile!.provider, model: profile!.model, effort: profile!.reasoningEffort, access: stages[index + 1].access }));
+          team.startTeam({ ...msg.task, executor: first.provider, model: first.model, effort: first.reasoningEffort, access: first.defaultAccessMode === 'workspace-write' ? 'write' : 'read' }, participants);
+        } else team.startTeam(msg.task, msg.colleague, msg.planner);
         if (msg.requestId) send(ws, { type: 'task.accepted', requestId: msg.requestId });
         broadcast({ type: 'board', config: board.config(), tasks: board.list() });
       } else if (msg.type === 'task.reply') {
@@ -204,6 +290,7 @@ board.on('task', (task) => {
   broadcast({ type: 'task', task });
   team.continueTeam(task);
 });
+board.on('stream', (stream) => broadcast({ type: 'task:stream:chunk', ...stream }));
 // Fake CLIs write no transcripts: put their workers in the office from the board instead.
 if (fake)
   board.on('task', (task) => {

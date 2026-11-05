@@ -128,7 +128,7 @@ export class MeetingPanel {
         <b>${ROLE[t.role]}</b> · ${EXECUTOR[t.executor]} · ${esc(model)}${t.effort ? ' · ' + esc(t.effort) : ''}
         <span class="turn-state">${TURN[t.status]}${t.access === 'read' ? ' · только чтение' : ''}</span>
       </div>
-      ${t.handoff ? `<details data-key="${key}" ${this.open.has(key) ? 'open' : ''}><summary>Передал дальше</summary><div class="task-result">${esc(t.handoff)}</div></details>` : ''}
+      ${t.handoff ? `<details data-key="${key}" ${this.open.has(key) ? 'open' : ''}><summary>Передал дальше</summary><div class="task-result">${esc(t.handoff)}</div>${t.artifactPath ? `<div class="meta dim">Полный артефакт: ${esc(t.artifactPath)}</div>` : ''}</details>` : ''}
       ${show ? `<button type="button" class="link" data-act="show" data-id="${esc(t.agentId!)}">Показать в офисе</button>` : ''}
     </li>`;
   }

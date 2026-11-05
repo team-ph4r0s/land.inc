@@ -110,6 +110,17 @@ body { overflow: hidden; }
 
 /* Shell */
 .app-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.mcp-banner { display: grid; gap: 6px; margin: 0 0 12px; padding: 12px 14px; border: 1px solid var(--line-2); border-radius: 12px; background: var(--warn-bg); color: var(--text); }
+.mcp-banner span { color: var(--muted); font-size: 12px; }
+.mcp-banner button { justify-self: start; }
+.studio-panel { display: grid; gap: 16px; padding: 18px 20px 28px; overflow: auto; }
+.studio-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+.studio-head h2 { margin: 4px 0 0; }
+.studio-agents { display: grid; gap: 10px; }
+.studio-agent { display: grid; gap: 5px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.studio-agent span, .studio-agent small { color: var(--muted); }
+.studio-agent button { justify-self: start; }
+.studio-form { display: grid; gap: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
 .app-bar { display: flex; align-items: center; height: 70px; flex: none; padding: 0 30px; background: var(--panel); border-bottom: 1px solid var(--line-2); gap: 32px; }
 .brand { width: 225px; display: flex; align-items: center; gap: 9px; white-space: nowrap; }
 .brand-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 11px; background: var(--accent-2); color: var(--on-accent); font-size: 23px; }
