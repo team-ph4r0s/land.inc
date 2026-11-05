@@ -89,30 +89,33 @@ export class AntigravityAdapter {
   }
   private apply(id: string, value: unknown, metadata: Metadata): void {
     if (!value || typeof value !== 'object') return;
-    const r = value as Record<string, any>;
-    if (!['USER_INPUT', 'PLANNER_RESPONSE', 'GENERIC'].includes(r.type)) return;
+    const r = value as Record<string, unknown>;
+    const type = typeof r.type === 'string' ? r.type : '';
+    if (!['USER_INPUT', 'PLANNER_RESPONSE', 'GENERIC'].includes(type)) return;
     const at = typeof r.created_at === 'string' ? Date.parse(r.created_at) : NaN;
     if (!Number.isFinite(at)) return;
-    const contextCwd = r.type === 'USER_INPUT' && typeof r.content === 'string' ? r.content.match(/^Command Working Directory:\s*(.+)$/im)?.[1]?.trim() : undefined;
+    const contextCwd = type === 'USER_INPUT' && typeof r.content === 'string' ? r.content.match(/^Command Working Directory:\s*(.+)$/im)?.[1]?.trim() : undefined;
     const cwd = metadata.cwd ?? contextCwd;
     this.store.update(id, { source: 'antigravity', ...metadata, ...(cwd ? { cwd, project: projectName(cwd) } : {}) }, at);
-    if (r.type === 'USER_INPUT' && typeof r.content === 'string' && r.content.trim()) {
+    if (type === 'USER_INPUT' && typeof r.content === 'string' && r.content.trim()) {
       const content = r.content.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/i)?.[1]?.trim() || r.content.trim();
       this.store.update(id, { source: 'antigravity', title: clip(content, 48) }, at);
       this.store.log(id, { at, kind: 'user', text: content });
       this.store.newTurn(id, 'Читает задачу', at);
-    } else if (r.type === 'PLANNER_RESPONSE') {
+    } else if (type === 'PLANNER_RESPONSE') {
       this.store.thinking(id, 'Размышляет', at);
       const calls = Array.isArray(r.tool_calls) ? r.tool_calls : [];
       if (typeof r.content === 'string' && r.content.trim()) this.store.log(id, { at, kind: 'assistant', text: r.content.trim() });
       for (const call of calls) {
-        if (!call || typeof call.name !== 'string') continue;
-        const { activity, detail, test } = describeTool(call.name, decodeArgs(call.args));
-        this.store.tool(id, call.name, activity, detail, at, test);
+        if (!call || typeof call !== 'object' || Array.isArray(call)) continue;
+        const callRecord = call as Record<string, unknown>;
+        if (typeof callRecord.name !== 'string') continue;
+        const { activity, detail, test } = describeTool(callRecord.name, decodeArgs(callRecord.args));
+        this.store.tool(id, callRecord.name, activity, detail, at, test);
       }
       // A response without tool calls is treated as a completed turn, heuristically.
       if (!calls.length && typeof r.content === 'string' && r.content.trim()) this.store.turnEnd(id, at);
-    } else if (r.type === 'GENERIC' && r.status !== 'RUNNING') {
+    } else if (type === 'GENERIC' && r.status !== 'RUNNING') {
       const content = typeof r.content === 'string' ? r.content : '';
       this.store.toolDone(id, at, commandOutcome(content) ?? testOutcome(content) ?? (r.status === 'ERROR' ? false : undefined));
     }

@@ -4,7 +4,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ModelOption, Task } from '@land/protocol';
 import { clip } from '../activity.ts';
-import { cliCommand, cliOnPath, compareVersions, headCwd, mtime, safeDir } from './files.ts';
+import { cliCommand, compareVersions, headCwd, mtime, safeDir } from './files.ts';
+import { locateCli, probeCommand } from './locator.ts';
 import type { Command, Executor, ExecutorStatus, OutputParser, PreparedRun } from './types.ts';
 
 export const CLAUDE_MODELS: ModelOption[] = [
@@ -62,6 +63,8 @@ export class ClaudeExecutor implements Executor {
       ...(resume ? ['--resume', resume] : ['--session-id', session, '-n', `Доска: ${clip(task.prompt, 40)}`]),
     ];
     if (task.effort) args.push('--effort', task.effort);
+    if (task.systemPrompt) args.push('--system-prompt', task.systemPrompt);
+    if (task.mcpConfigPath) args.push('--mcp-config', task.mcpConfigPath);
     return { args, agentId: session, output: printOutput() };
   }
 
@@ -122,7 +125,10 @@ function claudeBin(): Command | undefined {
   candidates.push(join(homedir(), '.claude', 'local', name), join(homedir(), '.local', 'bin', name));
   for (const bin of candidates) {
     const cmd = cliCommand(bin, 'claude', '@anthropic-ai/claude-code');
-    if (cmd) return cmd;
+    if (cmd && probeCommand(cmd).ok) return cmd;
   }
-  return cliOnPath('claude', '@anthropic-ai/claude-code');
+  for (const candidate of locateCli('claude', '@anthropic-ai/claude-code')) {
+    if (probeCommand(candidate.command).ok) return candidate.command;
+  }
+  return undefined;
 }

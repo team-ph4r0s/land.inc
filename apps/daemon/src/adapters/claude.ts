@@ -18,7 +18,7 @@ interface Tracked {
   titled: boolean;
 }
 
-type Rec = Record<string, any>;
+type Rec = Record<string, unknown>;
 
 /**
  * Claude Code (CLI, IDE, and the Code tab of Claude Desktop) appends every
@@ -100,7 +100,7 @@ export class ClaudeAdapter {
   }
 
   private apply(t: Tracked, rec: Rec): void {
-    const at = Date.parse(rec.timestamp) || Date.now();
+    const at = Date.parse(typeof rec.timestamp === 'string' ? rec.timestamp : '') || Date.now();
     // Older Claude Code versions inline subagent turns into the parent transcript.
     let id = t.id;
     let parentId = t.parentId;
@@ -125,7 +125,8 @@ export class ClaudeAdapter {
       patch.cwd = rec.cwd;
       patch.project = basename(rec.cwd);
     }
-    if (rec.message?.model && !String(rec.message.model).startsWith('<')) patch.model = rec.message.model;
+    const message = asRec(rec.message);
+    if (typeof message.model === 'string' && !message.model.startsWith('<')) patch.model = message.model;
     if (typeof rec.effort === 'string') patch.effort = rec.effort;
     if (!this.store.has(id)) {
       patch.startedAt = at;
@@ -133,8 +134,8 @@ export class ClaudeAdapter {
     }
     this.store.update(id, patch, at);
 
-    const content = rec.message?.content;
-    const blocks: Rec[] = typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? content : [];
+    const content = message.content;
+    const blocks: Rec[] = typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? content.map(asRec) : [];
 
     if (rec.type === 'user') {
       for (const b of blocks) {
@@ -159,16 +160,16 @@ export class ClaudeAdapter {
     }
 
     for (const b of blocks) {
-      if (b.type === 'tool_use') {
-        const { activity, detail, test } = describeTool(b.name, b.input);
+      if (b.type === 'tool_use' && typeof b.name === 'string') {
+        const { activity, detail, test } = describeTool(b.name, asRec(b.input));
         this.store.tool(id, b.name, activity, detail, at, test);
-      } else if (b.type === 'text' && b.text?.trim()) {
+      } else if (b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
         this.store.log(id, { at, kind: 'assistant', text: b.text });
       } else if (b.type === 'thinking') {
         this.store.thinking(id, 'Размышляет', at);
       }
     }
-    if (rec.message?.stop_reason === 'end_turn') this.store.turnEnd(id, at);
+    if (message.stop_reason === 'end_turn') this.store.turnEnd(id, at);
   }
 }
 
@@ -177,6 +178,8 @@ function isHumanText(text: unknown): text is string {
   // Slash-command wrappers, system reminders, hook output and similar plumbing.
   return !/^\s*<[a-z-]+[ >]/i.test(text) && !text.startsWith('Caveat:');
 }
+
+function asRec(value: unknown): Rec { return value && typeof value === 'object' && !Array.isArray(value) ? value as Rec : {}; }
 
 function readMeta(path: string): string | undefined {
   try {

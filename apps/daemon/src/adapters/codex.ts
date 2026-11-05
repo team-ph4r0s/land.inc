@@ -21,7 +21,7 @@ interface Tracked {
   muted?: Rec;
 }
 
-type Rec = Record<string, any>;
+type Rec = Record<string, unknown>;
 
 /**
  * Codex (CLI and desktop app) writes each thread as a "rollout" JSONL under
@@ -113,7 +113,7 @@ export class CodexAdapter {
         db.close();
         for (const r of rows) {
           const updated = Number(r.updated_at) < 1e12 ? Number(r.updated_at) * 1000 : Number(r.updated_at);
-          if (now - updated < RECENT_MS && r.rollout_path) out.set(String(r.rollout_path), { title: r.title || undefined });
+           if (now - updated < RECENT_MS && r.rollout_path) out.set(String(r.rollout_path), { title: typeof r.title === 'string' ? r.title : undefined });
         }
       } catch {
         // Schema changed or the database is locked; the sessions folder scan still works.
@@ -123,8 +123,8 @@ export class CodexAdapter {
   }
 
   private apply(t: Tracked, rec: Rec): void {
-    const at = Date.parse(rec.timestamp) || Date.now();
-    const p: Rec = rec.payload ?? {};
+    const at = Date.parse(typeof rec.timestamp === 'string' ? rec.timestamp : '') || Date.now();
+    const p: Rec = asRecord(rec.payload);
     const id = t.id;
 
     // The agent went home after a quiet spell. Only real work brings it back, with the
@@ -193,19 +193,23 @@ export class CodexAdapter {
         try {
           if (typeof p.arguments === 'string') input = JSON.parse(p.arguments);
           else if (typeof p.input === 'string') input = { code: p.input }; // code-mode `exec` and apply_patch send raw text
-          else if (p.input && typeof p.input === 'object') input = p.input;
+          else if (p.input && typeof p.input === 'object' && !Array.isArray(p.input)) input = p.input as Rec;
         } catch {
           // not JSON: leave the input empty
         }
-        const { activity, detail, test } = describeTool(p.name ?? 'tool', input);
-        return this.store.tool(id, p.name ?? 'tool', activity, detail, at, test);
+        const name = typeof p.name === 'string' ? p.name : 'tool';
+        const { activity, detail, test } = describeTool(name, input);
+        return this.store.tool(id, name, activity, detail, at, test);
       }
       case 'local_shell_call': {
-        const { activity, detail } = describeTool('local_shell', { command: p.action?.command });
+        const action = asRecord(p.action);
+        const { activity, detail } = describeTool('local_shell', { command: action.command });
         return this.store.tool(id, 'local_shell', activity, detail, at);
       }
-      case 'web_search_call':
-        return this.store.tool(id, 'web_search', 'web', `Гуглит «${clip(p.action?.query ?? '', 40)}»`, at);
+      case 'web_search_call': {
+        const query = asRecord(p.action).query;
+        return this.store.tool(id, 'web_search', 'web', `Гуглит «${clip(typeof query === 'string' ? query : '', 40)}»`, at);
+      }
       case 'function_call_output':
       case 'custom_tool_call_output':
         return this.store.toolDone(id, at, commandOutcome(outputText(p.output)) ?? testOutcome(outputText(p.output)));
@@ -231,14 +235,14 @@ function contextPatch(p: Rec): Parameters<Store['update']>[1] {
 /** Tool output is a string or a list of content parts, depending on the tool. */
 function outputText(output: unknown): string {
   if (typeof output === 'string') return output;
-  if (Array.isArray(output)) return output.map((c: Rec) => (typeof c?.text === 'string' ? c.text : '')).join('\n');
+  if (Array.isArray(output)) return output.map((c) => { const record = asRecord(c); return typeof record.text === 'string' ? record.text : ''; }).join('\n');
   return '';
 }
 
 /** Text of a message item, or '' for empty messages and injected context (AGENTS.md, environment). */
 function messageText(p: Rec): string {
   const text = (Array.isArray(p.content) ? p.content : [])
-    .map((c: Rec) => c.text)
+    .map((c) => asRecord(c).text)
     .filter((s: unknown) => typeof s === 'string')
     .join('\n');
   if (!text.trim() || /^\s*<(environment_context|user_instructions|permissions)/.test(text) || text.startsWith('# AGENTS.md')) return '';
@@ -250,10 +254,10 @@ const WAKING_EVENTS = new Set(['task_started', 'exec_approval_request', 'apply_p
 
 /** Records that mean the agent is working (or needs the user) again. */
 function wakesAgent(rec: Rec): boolean {
-  const p: Rec = rec.payload ?? {};
-  if (rec.type === 'event_msg') return WAKING_EVENTS.has(p.type);
+  const p: Rec = asRecord(rec.payload);
+  if (rec.type === 'event_msg') return typeof p.type === 'string' && WAKING_EVENTS.has(p.type);
   if (rec.type !== 'response_item') return false;
-  return WAKING_ITEMS.has(p.type) || (p.type === 'message' && !!messageText(p));
+  return (typeof p.type === 'string' && WAKING_ITEMS.has(p.type)) || (p.type === 'message' && !!messageText(p));
 }
 
 /**
@@ -263,11 +267,14 @@ function wakesAgent(rec: Rec): boolean {
  */
 function looksImported(recs: Rec[]): boolean {
   if (recs[0]?.type !== 'session_meta') return false;
-  const start = Date.parse(recs[0].timestamp);
-  const end = Date.parse(recs[recs.length - 1].timestamp);
-  const completed = recs.some((r) => r.type === 'event_msg' && r.payload?.type === 'task_complete');
+  const start = Date.parse(typeof recs[0].timestamp === 'string' ? recs[0].timestamp : '');
+  const last = recs[recs.length - 1];
+  const end = Date.parse(typeof last.timestamp === 'string' ? last.timestamp : '');
+  const completed = recs.some((r) => r.type === 'event_msg' && asRecord(r.payload).type === 'task_complete');
   return completed && end - start < 1_500;
 }
+
+function asRecord(value: unknown): Rec { return value && typeof value === 'object' && !Array.isArray(value) ? value as Rec : {}; }
 
 function walkRollouts(dir: string): string[] {
   try {

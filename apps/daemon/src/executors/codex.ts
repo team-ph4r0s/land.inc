@@ -1,12 +1,12 @@
-import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ModelOption, Task } from '@land/protocol';
-import { cliCommand, cliOnPath, headCwd, mtime } from './files.ts';
+import { cliCommand, headCwd, mtime } from './files.ts';
+import { locateCli, probeCommand } from './locator.ts';
 import type { Command, Executor, ExecutorStatus, OutputParser, PreparedRun } from './types.ts';
 
-type Rec = Record<string, any>;
+type Rec = Record<string, unknown>;
 
 export interface CodexOptions {
   /** Override the CLI, e.g. a fake one in tests. */
@@ -52,8 +52,9 @@ export class CodexExecutor implements Executor {
     // Nobody is there to approve: requests outside the sandbox are refused, not asked.
     args.push('-c', 'approval_policy="never"', '-m', task.model, '--skip-git-repo-check');
     if (task.effort) args.push('-c', `model_reasoning_effort="${task.effort}"`);
+    if (task.mcpConfigPath) args.push('-c', `mcp_config_path="${task.mcpConfigPath.replaceAll('"', '\\"')}"`);
     args.push('-');
-    return { args, agentId: resume ? `codex:${resume}` : undefined, output: jsonEvents(onAgent) };
+    return { args, stdin: task.systemPrompt ? `${task.systemPrompt}\n\n${task.prompt}` : task.prompt, agentId: resume ? `codex:${resume}` : undefined, output: jsonEvents(onAgent) };
   }
 
   sessionOf(agentId: string): string | undefined {
@@ -96,22 +97,24 @@ function jsonEvents(onAgent: (agentId: string) => void): OutputParser {
   const line = (text: string) => {
     let ev: Rec;
     try {
-      ev = JSON.parse(text);
+      ev = asRec(JSON.parse(text));
     } catch {
       return;
     }
-    const thread = ev.thread_id ?? ev.session_id ?? ev.msg?.session_id;
-    if (!agent && typeof thread === 'string' && /^(thread|session)\.(started|configured)$|^session_configured$/.test(ev.type ?? ev.msg?.type ?? '')) {
+    const msg = asRec(ev.msg);
+    const thread = ev.thread_id ?? ev.session_id ?? msg.session_id;
+    const eventType = typeof ev.type === 'string' ? ev.type : typeof msg.type === 'string' ? msg.type : '';
+    if (!agent && typeof thread === 'string' && /^(thread|session)\.(started|configured)$|^session_configured$/.test(eventType)) {
       agent = `codex:${thread}`;
       onAgent(agent);
     }
-    const item = ev.item ?? {};
+    const item = asRec(ev.item);
     if (ev.type === 'item.completed' && (item.type === 'agent_message' || item.item_type === 'assistant_message') && typeof item.text === 'string') {
       last = item.text.trim();
     } else if (ev.type === 'turn.completed') {
       final = last;
     } else if (ev.type === 'turn.failed' || ev.type === 'error') {
-      const message = ev.error?.message ?? ev.message;
+      const message = asRec(ev.error).message ?? ev.message;
       error = typeof message === 'string' ? message : 'Codex завершил ход с ошибкой';
     }
   };
@@ -137,34 +140,38 @@ function jsonEvents(onAgent: (agentId: string) => void): OutputParser {
 function codexBin(): Command | undefined {
   if (process.env.LAND_CODEX_BIN) {
     const cmd = cliCommand(process.env.LAND_CODEX_BIN, 'codex', '@openai/codex');
-    if (cmd) return cmd;
+    if (cmd && probeCommand(cmd).ok) return cmd;
   }
-  if (process.platform === 'win32') {
-    try {
-      const loc = execFileSync('powershell.exe', ['-NoProfile', '-Command', "(Get-AppxPackage -Name 'OpenAI.Codex*' | Select-Object -First 1).InstallLocation"], { encoding: 'utf8', windowsHide: true, timeout: 10_000 }).trim();
-      const exe = loc && join(loc, 'app', 'resources', 'codex.exe');
-      if (exe && existsSync(exe)) return { command: exe, args: [] };
-    } catch {
-      // no Store package
-    }
+  for (const candidate of locateCli('codex', '@openai/codex')) {
+    if (probeCommand(candidate.command).ok) return candidate.command;
   }
-  return cliOnPath('codex', '@openai/codex');
+  return undefined;
 }
 
 /** Models listed in Codex's local model cache; a cache, not a guarantee of access. */
 function codexModels(): ModelOption[] {
   try {
     const home = process.env.CODEX_HOME ?? join(homedir(), '.codex');
-    const cache = JSON.parse(readFileSync(join(home, 'models_cache.json'), 'utf8'));
-    return (cache.models as Rec[])
+    const cache = asRec(JSON.parse(readFileSync(join(home, 'models_cache.json'), 'utf8')));
+    const models = (Array.isArray(cache.models) ? cache.models.map(asRec) : [])
       .filter((m) => m.visibility !== 'hide' && typeof m.slug === 'string')
       .map((m) => ({
-        id: m.slug,
-        label: m.display_name ?? m.slug,
-        efforts: Array.isArray(m.supported_reasoning_levels) ? m.supported_reasoning_levels.map((r: Rec) => r.effort ?? r).filter((e: unknown) => typeof e === 'string') : undefined,
+        id: m.slug as string,
+        label: typeof m.display_name === 'string' ? m.display_name : m.slug as string,
+        efforts: Array.isArray(m.supported_reasoning_levels) ? m.supported_reasoning_levels.map((level) => typeof level === 'string' ? level : asRec(level).effort).filter((e): e is string => typeof e === 'string') : undefined,
         defaultEffort: typeof m.default_reasoning_level === 'string' ? m.default_reasoning_level : undefined,
       }));
+    return models.length ? models : CODEX_FALLBACK_MODELS;
   } catch {
-    return [];
+    return CODEX_FALLBACK_MODELS;
   }
 }
+
+const CODEX_FALLBACK_MODELS: ModelOption[] = [
+  { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', efforts: ['low', 'medium', 'high', 'xhigh'], defaultEffort: 'medium' },
+  { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', efforts: ['low', 'medium', 'high', 'xhigh'], defaultEffort: 'medium' },
+  { id: 'o3', label: 'o3', efforts: ['low', 'medium', 'high'] },
+  { id: 'o4-mini', label: 'o4-mini', efforts: ['low', 'medium', 'high'] },
+];
+
+function asRec(value: unknown): Rec { return value && typeof value === 'object' && !Array.isArray(value) ? value as Rec : {}; }

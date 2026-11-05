@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { Command } from './types.ts';
@@ -47,9 +47,32 @@ export function onPath(name: string): string | undefined {
   return paths(name)[0];
 }
 
-function paths(name: string): string[] {
+/** Probe a candidate before it is cached as an available CLI. Never uses a shell. */
+export function verifyExecutableRunnable(candidateCommand: Command, args: string[] = ['--version']): boolean {
   try {
-    const out = execFileSync(process.platform === 'win32' ? 'where.exe' : 'which', [name], { encoding: 'utf8', windowsHide: true, timeout: 5_000 });
+    const result = spawnSync(candidateCommand.command, [...candidateCommand.args, ...args], {
+      encoding: 'utf8', windowsHide: true, shell: false, timeout: 3_500, maxBuffer: 128 * 1024,
+    });
+    return !result.error && result.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+function paths(name: string): string[] {
+  if (process.platform === 'win32') {
+    const extensions = (process.env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';');
+    const found: string[] = [];
+    for (const dir of (process.env.PATH ?? '').split(';').filter(Boolean)) {
+      for (const extension of extensions) {
+        const candidate = join(dir, /\.[^.]+$/.test(name) ? name : `${name}${extension}`);
+        if (existsSync(candidate)) found.push(candidate);
+      }
+    }
+    return [...new Set(found)];
+  }
+  try {
+    const out = execFileSync('which', [name], { encoding: 'utf8', windowsHide: true, timeout: 5_000 });
     return out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   } catch {
     return [];
@@ -60,6 +83,7 @@ function paths(name: string): string[] {
  * entry with Node on Windows, keeping arguments out of a command shell. */
 export function cliCommand(bin: string, name: string, packageName: string): Command | undefined {
   if (!existsSync(bin)) return undefined;
+  if (process.platform === 'win32' && /[\\/]Program Files[\\/]WindowsApps(?:[\\/]|$)/i.test(bin)) return undefined;
   if (process.platform !== 'win32' || /\.(exe|com)$/i.test(bin)) return { command: bin, args: [] };
   try {
     const root = join(dirname(bin), 'node_modules', packageName);
