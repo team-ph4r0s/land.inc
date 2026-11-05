@@ -1,9 +1,9 @@
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { Resolver } from 'node:dns/promises';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
-import { homedir } from 'node:os';
+import { homedir, networkInterfaces } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import type { DnsAdapter, DnsFamily, DnsProbe, DnsSettings, DnsState } from '@land/protocol';
@@ -47,9 +47,14 @@ export class WindowsDnsBackend implements DnsBackend {
   supported = process.platform === 'win32';
   async read(): Promise<Adapter[]> {
     try {
-      const { stdout } = await exec(ps, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded(script() + '\nConvertTo-Json -InputObject @(Get-LandDnsAdapters) -Depth 8 -Compress')], { windowsHide: true, timeout: 30_000, encoding: 'utf8', maxBuffer: 512 * 1024 });
-      return JSON.parse(stdout.replace(/^\uFEFF/, '').trim());
-    } catch { throw new Error('Не удалось прочитать DNS Windows. Проверьте доступ к сетевым адаптерам и повторите обновление.'); }
+      const command = `${script()}\nConvertTo-Json -InputObject @(Get-LandDnsAdapters) -Depth 8 -Compress`;
+      const { stdout } = await exec(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded(command)], { windowsHide: true, timeout: 10_000, encoding: 'utf8', maxBuffer: 512 * 1024 });
+      const parsed: unknown = JSON.parse(stdout.replace(/^\uFEFF/, '').trim());
+      if (!Array.isArray(parsed)) throw new Error('Некорректный ответ Windows');
+      return parsed as Adapter[];
+    } catch {
+      return fallbackAdapters();
+    }
   }
   async change(before: Adapter, settings: DnsSettings): Promise<void> {
     const payload = Buffer.from(JSON.stringify({ before, settings }), 'utf8').toString('base64');
@@ -58,7 +63,7 @@ export class WindowsDnsBackend implements DnsBackend {
     const wrapper = `$ErrorActionPreference = 'Stop'\ntry { $p = Start-Process -FilePath '${ps.replaceAll("'", "''")}' -ArgumentList '-NoProfile -NonInteractive -EncodedCommand ${encoded(command)}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; Write-Output $p.ExitCode } catch { Write-Output 'UAC_CANCELLED' }`;
     let stdout: string;
     try {
-      ({ stdout } = await exec(ps, ['-NoProfile', '-NonInteractive', '-Command', wrapper], { windowsHide: true, encoding: 'utf8', maxBuffer: 64 * 1024 }));
+      ({ stdout } = await exec(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', wrapper], { windowsHide: true, encoding: 'utf8', maxBuffer: 64 * 1024 }));
     } catch {
       throw new Error('Не получен результат системного помощника. Обновите DNS и проверьте текущее состояние; копия прежних настроек сохранена');
     }
@@ -71,6 +76,53 @@ export class WindowsDnsBackend implements DnsBackend {
     if (code === '13') throw new Error('Системный помощник DNS уже выполняет другую операцию. Дождитесь её завершения и обновите состояние');
     throw new Error(`Системный помощник завершился с кодом ${code || 'неизвестно'}. Обновите состояние DNS`);
   }
+}
+
+function fallbackAdapters(): Adapter[] {
+  const interfaces = networkInterfaces();
+  const adapters: Adapter[] = [];
+  let parsedDns = new Map<string, string[]>();
+  let index = 1;
+  for (const [name, addresses] of Object.entries(interfaces)) {
+    const live = addresses?.filter((address) => address.address && !address.internal) ?? [];
+    if (!live.length) continue;
+    const adapter: Adapter = {
+      id: `fallback-${index}`,
+      index,
+      name,
+      ipv4: { mode: 'auto', servers: [] },
+      ipv6: { mode: 'auto', servers: [] },
+    };
+    adapters.push(adapter);
+    index += 1;
+  }
+  try {
+    const command = process.platform === 'win32' ? 'netsh.exe' : 'netsh';
+    const ipv4 = execFileSync(command, ['interface', 'ipv4', 'show', 'dnsservers'], { encoding: 'utf8', windowsHide: true, timeout: 10_000 });
+    const ipv6 = execFileSync(command, ['interface', 'ipv6', 'show', 'dnsservers'], { encoding: 'utf8', windowsHide: true, timeout: 10_000 });
+    parsedDns = parseNetshDns(`${ipv4}\n${ipv6}`);
+    if (!ipv4.trim() && !ipv6.trim() && adapters.length === 0) throw new Error('netsh returned no adapters');
+  } catch {
+    // os.networkInterfaces remains useful when netsh or CIM is unavailable.
+  }
+  return adapters.map((adapter) => {
+    const values = parsedDns.get(adapter.name.toLocaleLowerCase()) ?? [];
+    const v4 = values.filter((value) => isIP(value) === 4);
+    const v6 = values.filter((value) => isIP(value) === 6);
+    return { ...adapter, ipv4: { mode: v4.length ? 'manual' : 'auto', servers: v4 }, ipv6: { mode: v6.length ? 'manual' : 'auto', servers: v6 } };
+  });
+}
+
+function parseNetshDns(output: string): Map<string, string[]> {
+  const result = new Map<string, string[]>();
+  let current = '';
+  for (const line of output.split(/\r?\n/)) {
+    const header = line.match(/interface\s+["']?(.+?)["']?\s*:?$/i);
+    if (header) { current = header[1].trim().toLocaleLowerCase(); if (!result.has(current)) result.set(current, []); continue; }
+    const addresses = line.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b|\b[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){2,7}\b/gi) ?? [];
+    if (current && addresses.length) result.set(current, [...new Set([...(result.get(current) ?? []), ...addresses])]);
+  }
+  return result;
 }
 
 /** No Windows or network operations: used by --fake-agents and tests. */

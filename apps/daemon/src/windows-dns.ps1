@@ -2,6 +2,15 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+function Get-LandNormalizedStatus($adapter) {
+    $raw = @($adapter.Status, $adapter.MediaConnectionState, $adapter.InterfaceOperationalStatus) | Where-Object { $_ } | ForEach-Object { $_.ToString().ToLowerInvariant() }
+    if ($raw -match 'up|connected|1|7') { return 'up' }
+    if ($raw -match 'disabled|down|6') { return 'down' }
+    return 'disconnected'
+}
 
 function Get-LandDnsFamily($adapter, [string]$family) {
     $service = if ($family -eq 'IPv4') { 'Tcpip' } else { 'Tcpip6' }
@@ -20,15 +29,30 @@ function Get-LandDnsFamily($adapter, [string]$family) {
 }
 
 function Get-LandDnsAdapters {
-    return @(Get-NetAdapter -IncludeHidden | Where-Object Status -eq 'Up' | Sort-Object @{Expression='HardwareInterface';Descending=$true}, ifIndex | ForEach-Object {
+    return @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | ForEach-Object {
+        $adapter = $_
+        $status = Get-LandNormalizedStatus $adapter
+        $oper = 0
+        try { $oper = [int]$adapter.ifOperStatus } catch { $oper = 0 }
+        $addresses = @(Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4,IPv6 -ErrorAction SilentlyContinue)
+        $loopback = $adapter.InterfaceDescription -match '(?i)loopback' -or $adapter.Name -match '(?i)loopback'
+        $tunnelWithoutIp = $adapter.InterfaceDescription -match '(?i)tunnel' -and $addresses.Count -eq 0
+        if ($loopback -or $tunnelWithoutIp -or ($status -eq 'Disabled' -and $addresses.Count -eq 0)) { return }
         @{
             id = $_.InterfaceGuid.ToString().Trim('{}').ToLowerInvariant()
             index = [int]$_.ifIndex
             name = $_.Name
+            interfaceDescription = $_.InterfaceDescription
+            status = $status
+            mediaConnectionState = ([string]$adapter.MediaConnectionState)
+            interfaceOperationalStatus = ([string]$adapter.InterfaceOperationalStatus)
+            operStatus = $oper
+            macAddress = [string]$_.MacAddress
+            physical = [bool]$_.HardwareInterface
             ipv4 = Get-LandDnsFamily $_ 'IPv4'
             ipv6 = Get-LandDnsFamily $_ 'IPv6'
         }
-    } | Where-Object { $_.ipv4.mode -ne 'unknown' -or $_.ipv6.mode -ne 'unknown' })
+    } | Where-Object { $_.ipv4.mode -ne 'unknown' -or $_.ipv6.mode -ne 'unknown' } | Sort-Object index)
 }
 
 function Assert-LandDnsSettings($settings) {
