@@ -93,6 +93,16 @@ export interface Task {
   continues?: string;
   /** A cancel was not confirmed: processes this run started may still be at work in its session. */
   orphans?: boolean;
+  /** Every task owns a clean conversation and CLI session. */
+  conversationId?: string;
+  /** Pipeline run that owns this task, when it is part of a multi-agent workflow. */
+  pipelineRunId?: string;
+  /** Full artifact path for this task's result. */
+  artifactPath?: string;
+  systemPrompt?: string;
+  mcpConfigPath?: string;
+  /** Approximate context usage reported by the active provider. */
+  context?: { used: number; budget: number; compacted?: boolean };
 }
 
 export interface NewTask {
@@ -102,6 +112,91 @@ export interface NewTask {
   model: string;
   effort?: string;
   access: Access;
+  conversationId?: string;
+  pipelineRunId?: string;
+  systemPrompt?: string;
+  mcpConfigPath?: string;
+}
+
+export type AgentProvider = 'claude' | 'codex' | 'antigravity';
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
+export type AgentRoleType = 'writer' | 'coder' | 'reviewer' | 'editor' | 'planner' | 'security' | 'custom';
+export type AgentAccessMode = 'read-only' | 'workspace-write';
+
+export interface AvatarConfig {
+  outfitColor: string;
+  accessory?: 'crown' | 'beret' | 'glasses' | 'notebook' | 'companion' | 'none';
+  skinTone?: string;
+}
+
+export interface AgentPersona {
+  id: string;
+  name: string;
+  provider: AgentProvider;
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  roleType: AgentRoleType;
+  characterAndSystemPrompt: string;
+  defaultAccessMode: AgentAccessMode;
+  avatarConfig: AvatarConfig;
+  mandatoryMcpServers: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type AgentProfile = AgentPersona;
+
+export interface PipelineStage {
+  id: string;
+  agentId: string;
+  name: string;
+  order: number;
+  maxIterations?: number;
+  access: Access;
+  status?: 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+  artifactPath?: string;
+}
+
+export interface TeamPipeline {
+  id: string;
+  name: string;
+  stages: PipelineStage[];
+  loop?: { stageIds: string[]; maxIterations: number };
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type McpServerName = 'markitdown' | 'context-budget' | 'strategic-compact' | 'agentic-shield';
+export type McpServerStatus = 'installed' | 'available' | 'missing' | 'unhealthy' | 'installing';
+
+export interface McpStatus {
+  name: McpServerName;
+  status: McpServerStatus;
+  version?: string;
+  command?: string;
+  note?: string;
+  checkedAt: number;
+}
+
+export interface McpInstallRequest {
+  servers: McpServerName[];
+  runtimeDir?: string;
+}
+
+export interface SecurityToken {
+  value: string;
+  issuedAt: number;
+  expiresAt?: number;
+}
+
+export interface TaskArtifact {
+  id: string;
+  taskId: string;
+  stageId?: string;
+  path: string;
+  kind: 'draft' | 'review' | 'final' | 'summary' | 'log';
+  createdAt: number;
+  bytes: number;
 }
 
 /** author does the task, reviewers check it read-only, the finisher (the author again) wraps up. */
@@ -121,6 +216,7 @@ export interface CollabTurn {
   agentId?: string;
   /** What this turn passed on to the next one (its "## Коллеге" section). */
   handoff?: string;
+  artifactPath?: string;
 }
 
 /** A task worked on by several agents in turns: one card in «Переговорка». */
@@ -167,6 +263,13 @@ export interface DnsAdapter {
   ipv4: DnsFamily;
   ipv6: DnsFamily;
   revision: string;
+  status?: string;
+  mediaConnectionState?: string;
+  interfaceOperationalStatus?: string;
+  operStatus?: number;
+  interfaceDescription?: string;
+  macAddress?: string;
+  physical?: boolean;
 }
 export interface DnsSettings {
   ipv4: DnsFamily;
@@ -188,6 +291,12 @@ export interface DnsProbe {
 }
 
 export type ServerMessage =
+  | { type: 'security.session'; token: string; expiresAt?: number }
+  | { type: 'agents'; agents: AgentPersona[] }
+  | { type: 'agent'; event: Extract<ProtocolEvent, { type: `agent:${string}` }> }
+  | { type: 'mcp:status'; statuses: McpStatus[] }
+  | { type: 'mcp:install:progress'; name: McpServerName; progress: number; message: string }
+  | { type: 'mcp:install:complete'; statuses: McpStatus[] }
   | { type: 'updates'; state: UpdateState }
   | { type: 'dns.result'; requestId: string; state?: DnsState; probes?: DnsProbe[]; error?: string; message?: string }
   | { type: 'folders'; requestId: string; path?: string; parent?: string; folders?: string[]; error?: string }
@@ -197,6 +306,8 @@ export type ServerMessage =
   | { type: 'log'; id: string; entry: LogEntry }
   | { type: 'board'; config: BoardConfig; tasks: Task[] }
   | { type: 'task'; task: Task }
+  | { type: 'task:stream:chunk'; taskId: string; chunk: string; sequence: number }
+  | { type: 'artifact:saved'; requestId: string; path: string }
   | { type: 'task.accepted'; requestId: string }
   | { type: 'task.rejected'; requestId: string; message: string }
   | { type: 'collabs'; collabs: Collaboration[] }
@@ -213,7 +324,7 @@ export type ClientMessage =
   | { type: 'board.refresh' }
   | { type: 'folders.list'; requestId: string; path?: string }
   | { type: 'task.create'; task: NewTask; requestId?: string }
-  | { type: 'team.create'; task: NewTask; requestId?: string; colleague?: { model: string; effort?: string } | { executor: Executor; model: string; effort?: string }[]; planner?: { executor: Executor; model: string; effort?: string } }
+  | { type: 'team.create'; task: NewTask; requestId?: string; colleague?: { model: string; effort?: string } | { executor: Executor; model: string; effort?: string }[]; planner?: { executor: Executor; model: string; effort?: string }; pipeline?: TeamPipeline }
   | { type: 'task.cancel'; id: string }
   /** Stop a collaboration: the running turn is cancelled and no further turn starts. */
   | { type: 'team.cancel'; id: string }
@@ -221,7 +332,81 @@ export type ClientMessage =
    * Reply to the agent of a finished task: it continues in the same session, with what it
    * already knows. Only the task id is sent; the daemon finds the session itself.
    */
-  | { type: 'task.reply'; taskId: string; prompt: string; access: Access; model?: string; effort?: string; requestId?: string };
+  | { type: 'task.reply'; taskId: string; prompt: string; access: Access; model?: string; effort?: string; requestId?: string }
+  | { type: 'agents.list' }
+  | { type: 'agent.create'; agent: Partial<AgentPersona>; requestId?: string }
+  | { type: 'agent.update'; id: string; patch: Partial<AgentPersona>; requestId?: string }
+  | { type: 'agent.clone'; id: string; name?: string; requestId?: string }
+  | { type: 'agent.delete'; id: string; requestId?: string }
+  | { type: 'mcp.audit' }
+  | { type: 'mcp.install'; request: McpInstallRequest }
+  | { type: 'artifact.save'; taskId: string; path: string; format?: 'md' | 'txt'; requestId?: string };
+
+export type ProtocolEvent =
+  | { type: 'agent:created'; agent: AgentPersona }
+  | { type: 'agent:updated'; agent: AgentPersona }
+  | { type: 'agent:deleted'; id: string }
+  | { type: 'mcp:status'; statuses: McpStatus[] }
+  | { type: 'mcp:install:progress'; name: McpServerName; progress: number; message: string }
+  | { type: 'mcp:install:complete'; statuses: McpStatus[] }
+  | { type: 'pipeline:stage:start'; runId: string; stage: PipelineStage }
+  | { type: 'pipeline:stage:stream'; runId: string; stageId: string; chunk: string }
+  | { type: 'pipeline:stage:complete'; runId: string; stage: PipelineStage; artifact: TaskArtifact }
+  | { type: 'pipeline:artifact:ready'; runId: string; artifact: TaskArtifact }
+  | { type: 'task:stream:chunk'; taskId: string; chunk: string; sequence: number };
+
+export type WireMessage = ServerMessage | ClientMessage | ProtocolEvent;
+
+type RecordValue = Record<string, unknown>;
+const isRecord = (value: unknown): value is RecordValue => typeof value === 'object' && value !== null && !Array.isArray(value);
+const isString = (value: unknown): value is string => typeof value === 'string';
+const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+
+/** Runtime guard for messages received from a browser or a CLI hook. */
+export function isClientMessage(value: unknown): value is ClientMessage {
+  if (!isRecord(value) || !isString(value.type)) return false;
+  if (value.type === 'task.create' || value.type === 'team.create') {
+    const task = value.task;
+    return isRecord(task) && isString(task.prompt) && isString(task.cwd) && isString(task.executor) && isString(task.model) && (task.access === 'read' || task.access === 'write');
+  }
+  if (value.type === 'task.reply') return isString(value.taskId) && isString(value.prompt) && (value.access === 'read' || value.access === 'write');
+  if (value.type === 'task.cancel' || value.type === 'team.cancel') return isString(value.id);
+  if (value.type === 'folders.list' || value.type === 'dns.read' || value.type === 'dns.test' || value.type === 'dns.apply' || value.type === 'dns.restore') return isString(value.requestId);
+  if (value.type === 'updates.install') return isString(value.version) && isString(value.sha);
+  if (value.type === 'agents.list' || value.type === 'mcp.audit') return true;
+  if (value.type === 'agent.delete' || value.type === 'agent.clone') return isString(value.id);
+  if (value.type === 'agent.create') return isRecord(value.agent);
+  if (value.type === 'agent.update') return isString(value.id) && isRecord(value.patch);
+  if (value.type === 'mcp.install') return isRecord(value.request) && Array.isArray(value.request.servers);
+  if (value.type === 'artifact.save') return isString(value.taskId) && isString(value.path);
+  return ['updates.check', 'board.refresh'].includes(value.type);
+}
+
+/** Runtime guard for events emitted by the daemon. */
+export function isProtocolEvent(value: unknown): value is ProtocolEvent {
+  if (!isRecord(value) || !isString(value.type)) return false;
+  return value.type.startsWith('agent:') || value.type.startsWith('mcp:') || value.type.startsWith('pipeline:') || value.type === 'task:stream:chunk';
+}
+
+export function assertClientMessage(value: unknown): ClientMessage {
+  if (!isClientMessage(value)) throw new Error('Некорректное сообщение протокола');
+  return value;
+}
+
+export function isServerMessage(value: unknown): value is ServerMessage {
+  if (!isRecord(value) || !isString(value.type)) return false;
+  return ['security.session', 'agents', 'agent', 'mcp:status', 'mcp:install:progress', 'mcp:install:complete', 'updates', 'dns.result', 'folders', 'snapshot', 'upsert', 'remove', 'log', 'board', 'task', 'task:stream:chunk', 'artifact:saved', 'task.accepted', 'task.rejected', 'collabs', 'collab', 'error'].includes(value.type);
+}
+
+export function assertServerMessage(value: unknown): ServerMessage {
+  if (!isServerMessage(value)) throw new Error('Некорректное сообщение сервера');
+  return value;
+}
+
+export function isAgentPersona(value: unknown): value is AgentPersona {
+  if (!isRecord(value)) return false;
+  return isString(value.id) && isString(value.name) && ['claude', 'codex', 'antigravity'].includes(String(value.provider)) && isString(value.model) && ['low', 'medium', 'high', 'xhigh'].includes(String(value.reasoningEffort)) && isString(value.characterAndSystemPrompt) && isFiniteNumber(value.createdAt) && isFiniteNumber(value.updatedAt);
+}
 
 export const DAEMON_PORT = 4317;
 
