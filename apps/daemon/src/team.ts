@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { BoardConfig, Collaboration, CollabTurn, Executor, NewTask, Task } from '@land/protocol';
 import { readRecoverable, writeAtomic, type TaskBoard } from './tasks.ts';
+import { redactSecrets } from './security/shield.ts';
 
 /** A colleague works in the task's project with its own model. */
 export interface TeamParticipant {
@@ -20,15 +21,14 @@ type Handoff = {
   participants: TeamParticipant[];
   /** Index of the turn that is running; 0 is the author, the last one the finisher. */
   index: number;
-  answers: { executor: Executor; text: string }[];
+  answers: { executor: Executor; text: string; path?: string }[];
+  artifactDir: string;
 };
 
 /** Up to three colleagues besides the author: every one of them is a real, paid agent run. */
-export const MAX_PARTICIPANTS = 3;
+export const MAX_PARTICIPANTS = 20;
 const MAX_TASK = 10_000;
 /** What one agent may pass on; the board refuses prompts over 20 000 characters. */
-const MAX_ANSWER = 3_000;
-const PROMPT_BUDGET = 19_000;
 const KEEP_COLLABS = 30;
 const HEADING = '## Коллеге';
 
@@ -43,6 +43,7 @@ export interface TeamOptions {
   file?: string | null;
   /** Hears every change of a collaboration, for the office's «Переговорка». */
   onCollab?: (collab: Collaboration) => void;
+  artifactRoot?: string;
 }
 
 export function createTeamCoordinator(
@@ -163,7 +164,9 @@ export function createTeamCoordinator(
     };
     collabs.unshift(collab);
     trim();
-    handoffs.set(task.id, { collabId: collab.id, original: { ...input }, participants, index: 0, answers: [] });
+    const artifactDir = join(options.artifactRoot ?? join(task.cwd, '.land-workspace'), collab.id);
+    mkdirSync(artifactDir, { recursive: true });
+    handoffs.set(task.id, { collabId: collab.id, original: { ...input }, participants, index: 0, answers: [], artifactDir });
     changed(collab);
     return collab;
   }
@@ -217,12 +220,17 @@ export function createTeamCoordinator(
       return stop();
     }
     turn.handoff = handoffText(answer);
+    const artifactDir = team.artifactDir ?? join(task.cwd, '.land-workspace', collab.id);
+    mkdirSync(artifactDir, { recursive: true });
+    const artifactPath = join(artifactDir, `${String(team.index + 1).padStart(2, '0')}-${turn.role}.md`);
+    turn.artifactPath = artifactPath;
+    try { writeFileSync(artifactPath, redactSecrets(answer), 'utf8'); } catch (error) { onError(`Не удалось сохранить артефакт командного этапа: ${(error as Error).message}`); }
     if (collab.status === 'stopping') {
       close(collab, team.index, 'done', 'stopped', 'Остановлено пользователем');
       return stop();
     }
 
-    const answers = [...team.answers, { executor: task.executor, text: turn.handoff }];
+    const answers = [...team.answers, { executor: task.executor, text: turn.handoff, path: artifactPath }];
     const nextIndex = team.index + 1;
     const next = collab.turns[nextIndex];
     const finalTurn = next.role === 'finisher';
@@ -241,7 +249,7 @@ export function createTeamCoordinator(
       // Swap the finished turn for the next one in a single save: there is no moment when
       // the team is on disk under neither task, so a crash in between still leaves a trace.
       handoffs.delete(task.id);
-      handoffs.set(created.id, { ...team, index: nextIndex, answers });
+      handoffs.set(created.id, { ...team, artifactDir, index: nextIndex, answers });
       changed(collab);
       onHandoff(task, next.executor);
     } catch (e) {
@@ -290,17 +298,14 @@ export function createTeamCoordinator(
 export function handoffText(answer: string): string {
   const i = answer.lastIndexOf(HEADING);
   const text = (i >= 0 ? answer.slice(i + HEADING.length) : answer).trim();
-  return text.length > MAX_ANSWER ? '…' + text.slice(-MAX_ANSWER) : text;
+  return redactSecrets(text);
 }
 
 /** Quote colleagues' messages as data, so their text cannot pose as the user's task or close the quote. */
-export function buildPrompt(task: string, answers: { executor: Executor; text: string }[], instruction: string): string {
+export function buildPrompt(task: string, answers: { executor: Executor; text: string; path?: string }[], instruction: string): string {
   const fence = (s: string) => s.replace(/<<<|>>>/g, '‹‹‹');
-  const room = PROMPT_BUDGET - task.length - DATA_NOTE.length - instruction.length - 400;
-  const each = Math.max(200, Math.floor(room / Math.max(1, answers.length)));
   const quoted = answers.map((a, i) => {
-    const text = a.text.length > each ? '…' + a.text.slice(-each) : a.text;
-    return `<<<СООБЩЕНИЕ ${i + 1} от ${a.executor}\n${fence(text)}\nСООБЩЕНИЕ ${i + 1}>>>`;
+    return `<<<СООБЩЕНИЕ ${i + 1} от ${a.executor}\n${fence(a.text)}\nСООБЩЕНИЕ ${i + 1}>>>\nПолный артефакт: ${a.path ?? 'не сохранён'}`;
   });
   return `Задача пользователя:\n<<<ЗАДАЧА\n${fence(task)}\nЗАДАЧА>>>\n\n${DATA_NOTE}\n\n${quoted.join('\n\n')}\n\n${instruction}`;
 }

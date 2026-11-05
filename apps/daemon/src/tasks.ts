@@ -10,9 +10,14 @@ import type { Executor, OutputParser } from './executors/types.ts';
 import { ClaudeExecutor } from './executors/claude.ts';
 import { CodexExecutor } from './executors/codex.ts';
 import { AntigravityExecutor } from './executors/antigravity.ts';
+import { sanitizeWorkspacePath } from './security/shield.ts';
+import { HangDetector } from './supervisor.ts';
+import { McpManager } from './executors/mcp-manager.ts';
+import { redactSecrets } from './security/shield.ts';
+import { preIteration, postIteration } from './pipeline/hooks.ts';
 
 const MAX_RUNNING = 4;
-const MAX_PROMPT = 20_000;
+const MAX_PROMPT = 100_000;
 const KEEP_TASKS = 100;
 const CONFIG_TTL_MS = 60_000;
 const EXECUTORS: ExecutorId[] = ['claude', 'codex', 'antigravity'];
@@ -29,7 +34,9 @@ export interface BoardOptions {
  * a model, and the daemon starts that agent's own CLI in the folder. The CLI writes
  * its transcript as usual, so the new worker walks into the office by itself.
  */
-export class TaskBoard extends EventEmitter<{ task: [Task] }> {
+export interface StreamChunk { taskId: string; chunk: string; sequence: number; }
+
+export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk] }> {
   private tasks: Task[] = [];
   private procs = new Map<string, ChildProcess>();
   private outputs = new Map<string, OutputParser>();
@@ -48,6 +55,11 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
   /** Swappable in tests. */
   private killTree = killTree;
   private store: Store;
+  private readonly hangs = new HangDetector();
+  private readonly mcp = new McpManager();
+  private readonly streamBuffers = new Map<string, string>();
+  private readonly streamTimers = new Map<string, NodeJS.Timeout>();
+  private readonly streamSequences = new Map<string, number>();
 
   constructor(store: Store, options: BoardOptions = {}) {
     super();
@@ -66,6 +78,12 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
     process.on('exit', () => {
       for (const p of this.procs.values()) killTree(p, true);
     });
+    setInterval(() => {
+      for (const record of this.hangs.check()) {
+        const task = this.tasks.find((item) => item.id === record.taskId);
+        if (task && (task.status === 'starting' || task.status === 'running')) this.annotate(task.id, `Процесс не отвечает более ${Math.round((Date.now() - record.lastActivity) / 1000)} с. Можно мягко перезапустить этот этап или остановить дерево процессов.`);
+      }
+    }, 5_000).unref();
   }
 
   list(): Task[] {
@@ -74,6 +92,11 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
 
   fullResult(id: string): string | undefined {
     return this.full.get(id);
+  }
+
+  get(id: string): Task | undefined {
+    const task = this.tasks.find((item) => item.id === id);
+    return task ? structuredClone(task) : undefined;
   }
 
   /** Add a note to a task's result, e.g. why the team it belonged to stopped. */
@@ -102,7 +125,7 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
   /**
    * Reply to the agent of a finished task: a new task that continues the same session, so
    * the agent keeps what it learned. The folder and the agent stay; access, model and effort
-   * are chosen again and checked like any task. The session id never comes from the client.
+   * are chosen again and checked like every task. The session id never comes from the client.
    */
   reply(taskId: string, input: { prompt: string; access: Access; model?: string; effort?: string }): Task {
     const previous = this.tasks.find((t) => t.id === taskId);
@@ -119,20 +142,20 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
       throw new Error('Этот агент уже отвечает на другое сообщение');
     return this.create(
       // Model and effort stay as they were unless the reply picks others.
-      { prompt: input.prompt, cwd: previous.cwd, executor: previous.executor, model: input.model || previous.model, effort: input.effort || (input.model ? undefined : previous.effort), access: input.access },
+      { prompt: input.prompt, cwd: previous.cwd, executor: previous.executor, model: input.model || previous.model, effort: input.effort || (input.model ? undefined : previous.effort), access: input.access, conversationId: previous.conversationId, systemPrompt: previous.systemPrompt, mcpConfigPath: previous.mcpConfigPath },
       { resume: session, continues: previous.id, agentId: previous.agentId },
     );
   }
 
   /** Validate and start a task. Throws an Error with a message for the user. */
   create(input: NewTask, from?: { resume: string; continues: string; agentId?: string }): Task {
-    const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
+    const prompt = typeof input.prompt === 'string' ? preIteration(input.prompt.trim()).prompt : '';
     if (!prompt) throw new Error('Опишите задачу');
     if (prompt.length > MAX_PROMPT) throw new Error(`Задача длиннее ${MAX_PROMPT} символов`);
     // Check before resolve(): an empty or relative path would quietly become the daemon's own folder.
     const raw = typeof input.cwd === 'string' ? input.cwd.trim() : '';
     if (!raw || !isAbsolute(raw)) throw new Error('Укажите полный путь к папке проекта');
-    const cwd = resolve(raw);
+    const cwd = sanitizeWorkspacePath(resolve(raw), resolve(raw));
     if (!isDir(cwd)) throw new Error('Папка проекта не найдена');
     if (!EXECUTORS.includes(input.executor)) throw new Error('Неизвестный исполнитель');
     if (input.access !== 'read' && input.access !== 'write') throw new Error('Неизвестный режим доступа');
@@ -149,6 +172,7 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
     if (input.access === 'write' && live.some((t) => t.access === 'write' && overlaps(t.cwd, cwd)))
       throw new Error('В этой папке уже работает задача с правом записи. Дождитесь её завершения или выберите «Только чтение».');
 
+    const conversationId = input.conversationId ?? randomUUID();
     const task: Task = {
       id: randomUUID(),
       prompt,
@@ -160,6 +184,9 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
       outsideGit: !inGit(cwd) || undefined,
       status: 'starting',
       createdAt: Date.now(),
+      conversationId,
+      mcpConfigPath: input.mcpConfigPath ?? this.mcp.writeSessionConfig(conversationId),
+      systemPrompt: input.systemPrompt,
       ...(from ? { continues: from.continues, agentId: from.agentId } : {}),
     };
     if (from) this.resumes.set(task.id, from.resume);
@@ -245,14 +272,17 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
       return this.finish(task, 'failed', launchError(e as NodeJS.ErrnoException, command));
     }
     this.procs.set(task.id, child);
+    this.hangs.start(task.id, child);
     this.outputs.set(task.id, output);
     let stdout = '';
     let stderr = '';
     child.stdout?.setEncoding('utf8').on('data', (d: string) => {
+      this.hangs.touch(task.id);
       stdout = (stdout + d).slice(-200_000);
+      this.queueStream(task.id, d);
       output.onStdout(d);
     });
-    child.stderr?.setEncoding('utf8').on('data', (d: string) => (stderr = (stderr + d).slice(-8_000)));
+    child.stderr?.setEncoding('utf8').on('data', (d: string) => { this.hangs.touch(task.id); stderr = (stderr + d).slice(-8_000); this.queueStream(task.id, d); });
     child.on('spawn', () => {
       task.status = 'running';
       this.changed(task);
@@ -260,6 +290,8 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
     child.on('error', (e) => this.finish(task, 'failed', launchError(e, command)));
     child.on('close', (code) => {
       this.procs.delete(task.id);
+      this.hangs.stop(task.id);
+      this.flushStream(task.id);
       const result = output.finish(code, stdout, stderr);
       const cancel = this.cancels.get(task.id);
       if (task.status === 'cancelling' && cancel) {
@@ -282,14 +314,34 @@ export class TaskBoard extends EventEmitter<{ task: [Task] }> {
     task.finishedAt = Date.now();
     // Keep the answer in the persisted task too: the UI and a restarted daemon
     // must see the same text as the session continuation (bounded CLI capture).
-    task.result = result;
-    if (result) {
-      this.full.set(task.id, result.slice(-200_000));
+    const safeResult = result ? postIteration(result).text : result;
+    task.result = safeResult;
+    if (safeResult) {
+      this.full.set(task.id, safeResult.slice(-200_000));
       if (this.full.size > 20) this.full.delete(this.full.keys().next().value!);
     }
     this.outputs.delete(task.id);
     this.resumes.delete(task.id);
     this.changed(task);
+  }
+
+  private queueStream(taskId: string, chunk: string): void {
+    const current = `${this.streamBuffers.get(taskId) ?? ''}${redactSecrets(chunk)}`.slice(-64_000);
+    this.streamBuffers.set(taskId, current);
+    if (this.streamTimers.has(taskId)) return;
+    this.streamTimers.set(taskId, setTimeout(() => this.flushStream(taskId), 60));
+  }
+
+  private flushStream(taskId: string): void {
+    const timer = this.streamTimers.get(taskId);
+    if (timer) clearTimeout(timer);
+    this.streamTimers.delete(taskId);
+    const chunk = this.streamBuffers.get(taskId);
+    if (!chunk) return;
+    this.streamBuffers.delete(taskId);
+    const sequence = (this.streamSequences.get(taskId) ?? 0) + 1;
+    this.streamSequences.set(taskId, sequence);
+    this.emit('stream', { taskId, chunk, sequence });
   }
 
   private changed(task: Task): void {
