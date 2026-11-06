@@ -12,6 +12,7 @@ import { MeetingPanel } from './meeting';
 import { DnsPanel } from './dns';
 import { UpdatePanel } from './updates';
 import { AgentStudioPanel } from './studio';
+import { DiagnosticsPanel } from './diagnostics';
 import './style.css';
 
 const stage = document.getElementById('stage')!;
@@ -96,6 +97,7 @@ const meeting = new MeetingPanel(sidebar.teamPane, (m) => send(m), (id) => {
 const dns = new DnsPanel(sidebar.dnsPane, (m) => send(m));
 const updatePanel = new UpdatePanel(sidebar.updatesPane, (m) => send(m));
 const studio = new AgentStudioPanel(sidebar.studioPane, (m) => send(m));
+const diagnostics = new DiagnosticsPanel(sidebar.diagnosticsPane, (m) => send(m));
 document.getElementById('office-version')!.addEventListener('click', () => sidebar.show('updates'));
 office.onUpdate = () => sidebar.show('updates');
 let installedVersion: string | undefined;
@@ -150,6 +152,9 @@ send = connect(
       case 'agents':
       case 'agent':
         studio.receive(m);
+        return;
+      case 'diagnostics':
+        diagnostics.receive(m);
         return;
       case 'collabs':
         meeting.setAll(m.collabs);
@@ -209,7 +214,7 @@ send = connect(
     sidebar.scheduleRender(states, logs, selected);
     if (m.type !== 'log') syncBoard();
   },
-  (online) => { sidebar.setOnline(online); dns.setOnline(online); updatePanel.setOnline(online); if (!online) board.disconnected(); },
+  (online) => { sidebar.setOnline(online); dns.setOnline(online); updatePanel.setOnline(online); diagnostics.setOnline(online); if (!online) board.disconnected(); },
 );
 
 app.ticker.add((t) => {

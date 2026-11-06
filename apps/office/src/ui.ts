@@ -14,7 +14,7 @@ const ago = (t: number) => {
   return s < 60 ? `${s} с` : s < 3600 ? `${Math.round(s / 60)} мин` : `${Math.round(s / 3600)} ч`;
 };
 
-export type Tab = 'office' | 'tasks' | 'team' | 'studio' | 'dns' | 'updates';
+export type Tab = 'office' | 'tasks' | 'team' | 'studio' | 'diagnostics' | 'dns' | 'updates';
 
 /** Sidebar with three tabs: the agent roster (with the selected agent's log), the task board and «Переговорка». */
 export class Sidebar {
@@ -31,6 +31,7 @@ export class Sidebar {
   /** Host element for «Переговорка». */
   readonly teamPane: HTMLElement;
   readonly studioPane: HTMLElement;
+  readonly diagnosticsPane: HTMLElement;
   readonly dnsPane: HTMLElement;
   readonly updatesPane: HTMLElement;
   onConversation?: (id: string) => void;
@@ -38,7 +39,7 @@ export class Sidebar {
   private last?: [Map<string, AgentState>, Map<string, LogEntry[]>, string | undefined];
 
   constructor(root: HTMLElement, onPick: (id: string) => void) {
-    root.innerHTML = '<div class="panel-resizer" role="separator" tabindex="0" aria-label="Ширина рабочей панели" aria-orientation="vertical" aria-valuemin="380" aria-valuemax="1100" aria-valuenow="560"></div><div class="head"></div><div class="pane office" hidden></div><div class="pane tasks"></div><div class="pane team" hidden></div><div class="pane studio" hidden></div><div class="pane dns" hidden></div><div class="pane updates" hidden></div>';
+    root.innerHTML = '<div class="panel-resizer" role="separator" tabindex="0" aria-label="Ширина рабочей панели" aria-orientation="vertical" aria-valuemin="380" aria-valuemax="1100" aria-valuenow="560"></div><div class="head"></div><div class="pane office" hidden></div><div class="pane tasks"></div><div class="pane team" hidden></div><div class="pane studio" hidden></div><div class="pane diagnostics" hidden></div><div class="pane dns" hidden></div><div class="pane updates" hidden></div>';
     const resize = root.querySelector<HTMLElement>('.panel-resizer')!;
     const setWidth = (width: number) => {
       const value = Math.round(Math.max(380, Math.min(width, window.innerWidth - 180, 1100)));
@@ -58,6 +59,7 @@ export class Sidebar {
     this.tasksPane = root.querySelector('.pane.tasks')!;
     this.teamPane = root.querySelector('.pane.team')!;
     this.studioPane = root.querySelector('.pane.studio')!;
+    this.diagnosticsPane = root.querySelector('.pane.diagnostics')!;
     this.dnsPane = root.querySelector('.pane.dns')!;
     this.updatesPane = root.querySelector('.pane.updates')!;
     this.onPick = onPick;
@@ -88,6 +90,7 @@ export class Sidebar {
     this.tasksPane.hidden = tab !== 'tasks';
     this.teamPane.hidden = tab !== 'team';
     this.studioPane.hidden = tab !== 'studio';
+    this.diagnosticsPane.hidden = tab !== 'diagnostics';
     this.dnsPane.hidden = tab !== 'dns';
     this.updatesPane.hidden = tab !== 'updates';
     if (tab === 'dns') this.dnsPane.dispatchEvent(new Event('dns-open'));
@@ -176,6 +179,7 @@ export class Sidebar {
         <button type="button" data-tab="tasks" class="${this.tab === 'tasks' ? 'on' : ''}">Разговоры${badge}</button>
         <button type="button" data-tab="team" class="${this.tab === 'team' ? 'on' : ''}">Переговорка${this.meeting ? ` <b>${this.meeting}</b>` : ''}</button>
         <button type="button" data-tab="studio" class="${this.tab === 'studio' ? 'on' : ''}">Агенты</button>
+        <button type="button" data-tab="diagnostics" class="${this.tab === 'diagnostics' ? 'on' : ''}">Здоровье</button>
         <button type="button" data-tab="dns" class="${this.tab === 'dns' ? 'on' : ''}">DNS</button>
         <button type="button" data-tab="updates" class="${this.tab === 'updates' ? 'on' : ''}">Обновления</button>
       </nav>`;

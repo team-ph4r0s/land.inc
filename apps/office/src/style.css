@@ -121,6 +121,10 @@ body { overflow: hidden; }
 .studio-agent span, .studio-agent small { color: var(--muted); }
 .studio-agent button { justify-self: start; }
 .studio-form { display: grid; gap: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.diagnostics-panel { display: grid; gap: 12px; padding: 18px 20px 28px; overflow: auto; }
+.diagnostics-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.diagnostics-metrics div { display: grid; gap: 3px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.diagnostics-metrics span { color: var(--muted); font-size: 12px; }
 .app-bar { display: flex; align-items: center; height: 70px; flex: none; padding: 0 30px; background: var(--panel); border-bottom: 1px solid var(--line-2); gap: 32px; }
 .brand { width: 225px; display: flex; align-items: center; gap: 9px; white-space: nowrap; }
 .brand-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 11px; background: var(--accent-2); color: var(--on-accent); font-size: 23px; }
