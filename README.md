@@ -15,7 +15,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178c6?style=flat-square&logo=typescript)](https://www.typescriptlang.org)
 [![Node.js](https://img.shields.io/badge/Node.js-24%2B-5fa04e?style=flat-square&logo=nodedotjs)](https://nodejs.org)
 [![PixiJS](https://img.shields.io/badge/Render-PixiJS%208-e72264?style=flat-square&logo=pixijs)](https://pixijs.com)
-[![Version](https://img.shields.io/badge/version-1.3.0-informational?style=flat-square)](https://github.com/team-ph4r0s/land.inc/releases)
+[![Version](https://img.shields.io/badge/version-1.4.0-informational?style=flat-square)](https://github.com/team-ph4r0s/land.inc/releases)
 
 [![Security](https://img.shields.io/badge/security-Agentic%20Shield%20%7C%20Zero%20Secrets-brightgreen?style=flat-square)](#-безопасность-и-agentic-shield)
 [![Privacy](https://img.shields.io/badge/privacy-100%25%20Local%20%7C%20Zero%20Telemetry-7952b3?style=flat-square)](#)
@@ -345,3 +345,17 @@ npm run build
 
 ### Лицензия
 Проект распространяется под лицензией **MIT** ([`LICENSE`](LICENSE)). Авторы — **Pharos** (`team-ph4r0s`).
+## Рефакторинг 1.4
+
+В версии 1.4 daemon и office работают через единый защищённый контур:
+
+- Agent Studio хранит кастомные профили в `~/.land/agents.json`, поддерживает пресеты, импорт/экспорт и индивидуальные MCP-настройки.
+- Новый pipeline сохраняет полные результаты этапов в `.land-workspace/<runId>/`, передаёт артефакты без ограничения в 3000 символов и использует context-budget/strategic-compact.
+- `markitdown`, `context-budget`, `strategic-compact` и `agentic-shield` проверяются перед задачей, конфиг MCP создаётся для каждой CLI-сессии, а отсутствующие компоненты устанавливаются в `~/.land/mcp-runtime/`.
+- Windows locator исключает `Program Files\\WindowsApps`, выполняет dry-run probe и переключается на npm/AppExecutionAlias при `EPERM` или `EACCES`.
+- Windows DNS использует структурированный UTF-8 PowerShell, локализованные статусы адаптеров и fallback через `os.networkInterfaces()`/`netsh`.
+- Локальный daemon требует `X-Land-Token`, сохраняет токен в `~/.land/daemon.token`, ограничивает hook body 256 КБ и отдаёт security headers.
+- Ответы CLI стримятся с окном 60 мс, формы сохраняют фокус, а результаты можно копировать, скачивать и сохранять в рабочую папку.
+- Панель «Здоровье» показывает uptime, RAM, активные процессы, CLI и MCP.
+
+Обновление из Release выполняет отдельный clone, `npm ci`, typecheck, тесты и production build до переключения active-версии; при сбое supervisor возвращает предыдущую версию и данные из `~/.land/`.

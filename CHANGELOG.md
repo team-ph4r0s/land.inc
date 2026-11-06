@@ -1,5 +1,12 @@
 # История версий
 
+## 1.4
+
+- Добавлены streaming-события задач с троттлингом 60 мс и сохранением фокуса в формах office.
+- Добавлены сохранение артефактов в проект, скачивание Markdown, диагностика daemon/CLI/MCP и индивидуальная установка MCP.
+- Усилены токены daemon: `~/.land/daemon.token`, security headers, лимит hook body 256 КБ и строгая проверка рабочих путей.
+- Улучшены Windows CLI locator и DNS fallback, добавлены pre/post iteration hooks Agentic Shield и context budget.
+
 ## 1.0
 
 Первый выпуск land.inc — локального офиса AI-агентов.
