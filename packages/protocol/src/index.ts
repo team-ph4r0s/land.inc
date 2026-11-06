@@ -183,6 +183,14 @@ export interface McpInstallRequest {
   runtimeDir?: string;
 }
 
+export interface DaemonDiagnostics {
+  uptimeSeconds: number;
+  rssBytes: number;
+  activeProcesses: number;
+  executors: BoardConfig['executors'];
+  mcp: McpStatus[];
+}
+
 export interface SecurityToken {
   value: string;
   issuedAt: number;
@@ -308,6 +316,7 @@ export type ServerMessage =
   | { type: 'task'; task: Task }
   | { type: 'task:stream:chunk'; taskId: string; chunk: string; sequence: number }
   | { type: 'artifact:saved'; requestId: string; path: string }
+  | { type: 'diagnostics'; diagnostics: DaemonDiagnostics }
   | { type: 'task.accepted'; requestId: string }
   | { type: 'task.rejected'; requestId: string; message: string }
   | { type: 'collabs'; collabs: Collaboration[] }
@@ -340,6 +349,7 @@ export type ClientMessage =
   | { type: 'agent.delete'; id: string; requestId?: string }
   | { type: 'mcp.audit' }
   | { type: 'mcp.install'; request: McpInstallRequest }
+  | { type: 'diagnostics.read' }
   | { type: 'artifact.save'; taskId: string; path: string; format?: 'md' | 'txt'; requestId?: string };
 
 export type ProtocolEvent =
@@ -373,7 +383,7 @@ export function isClientMessage(value: unknown): value is ClientMessage {
   if (value.type === 'task.cancel' || value.type === 'team.cancel') return isString(value.id);
   if (value.type === 'folders.list' || value.type === 'dns.read' || value.type === 'dns.test' || value.type === 'dns.apply' || value.type === 'dns.restore') return isString(value.requestId);
   if (value.type === 'updates.install') return isString(value.version) && isString(value.sha);
-  if (value.type === 'agents.list' || value.type === 'mcp.audit') return true;
+  if (value.type === 'agents.list' || value.type === 'mcp.audit' || value.type === 'diagnostics.read') return true;
   if (value.type === 'agent.delete' || value.type === 'agent.clone') return isString(value.id);
   if (value.type === 'agent.create') return isRecord(value.agent);
   if (value.type === 'agent.update') return isString(value.id) && isRecord(value.patch);
@@ -395,7 +405,7 @@ export function assertClientMessage(value: unknown): ClientMessage {
 
 export function isServerMessage(value: unknown): value is ServerMessage {
   if (!isRecord(value) || !isString(value.type)) return false;
-  return ['security.session', 'agents', 'agent', 'mcp:status', 'mcp:install:progress', 'mcp:install:complete', 'updates', 'dns.result', 'folders', 'snapshot', 'upsert', 'remove', 'log', 'board', 'task', 'task:stream:chunk', 'artifact:saved', 'task.accepted', 'task.rejected', 'collabs', 'collab', 'error'].includes(value.type);
+  return ['security.session', 'agents', 'agent', 'mcp:status', 'mcp:install:progress', 'mcp:install:complete', 'updates', 'dns.result', 'folders', 'snapshot', 'upsert', 'remove', 'log', 'board', 'task', 'task:stream:chunk', 'artifact:saved', 'diagnostics', 'task.accepted', 'task.rejected', 'collabs', 'collab', 'error'].includes(value.type);
 }
 
 export function assertServerMessage(value: unknown): ServerMessage {

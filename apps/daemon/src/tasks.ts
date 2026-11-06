@@ -99,6 +99,8 @@ export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk
     return task ? structuredClone(task) : undefined;
   }
 
+  activeCount(): number { return this.procs.size; }
+
   /** Add a note to a task's result, e.g. why the team it belonged to stopped. */
   annotate(id: string, note: string): void {
     const task = this.tasks.find((t) => t.id === id);

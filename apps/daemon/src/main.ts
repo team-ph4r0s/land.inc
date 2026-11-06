@@ -215,6 +215,7 @@ wss.on('connection', (ws) => {
         agents.remove(msg.id);
         broadcast({ type: 'agent', event: { type: 'agent:deleted', id: msg.id } });
       } else if (msg.type === 'mcp.audit') send(ws, { type: 'mcp:status', statuses: await mcp.audit() });
+      else if (msg.type === 'diagnostics.read') send(ws, { type: 'diagnostics', diagnostics: { uptimeSeconds: Math.round(process.uptime()), rssBytes: process.memoryUsage().rss, activeProcesses: board.activeCount(), executors: board.config(true).executors, mcp: await mcp.audit() } });
       else if (msg.type === 'mcp.install') {
         const statuses = await mcp.install(msg.request, (name, progress, message) => broadcast({ type: 'mcp:install:progress', name, progress, message }));
         broadcast({ type: 'mcp:install:complete', statuses });

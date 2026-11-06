@@ -74,16 +74,19 @@ export class McpManager {
 
   writeSessionConfig(sessionId: string): string {
     const safeId = sessionId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80) || 'session';
-    try { mkdirSync(this.runtimeDir, { recursive: true }); }
+    const write = (): string => {
+      mkdirSync(this.runtimeDir, { recursive: true });
+      const configDir = join(dirname(this.runtimeDir), 'mcp-configs');
+      mkdirSync(configDir, { recursive: true });
+      const path = join(configDir, `${safeId}-mcp.json`);
+      writeFileSync(path, JSON.stringify(this.configForSession(sessionId), null, 2), 'utf8');
+      return path;
+    };
+    try { return write(); }
     catch {
       this.runtimeDir = join(process.cwd(), '.land', 'mcp-runtime');
-      mkdirSync(this.runtimeDir, { recursive: true });
+      return write();
     }
-    const configDir = join(dirname(this.runtimeDir), 'mcp-configs');
-    mkdirSync(configDir, { recursive: true });
-    const path = join(configDir, `${safeId}-mcp.json`);
-    writeFileSync(path, JSON.stringify(this.configForSession(sessionId), null, 2), 'utf8');
-    return path;
   }
 
   async install(request: McpInstallRequest, onProgress: (name: McpServerName, progress: number, message: string) => void = () => {}): Promise<McpStatus[]> {
