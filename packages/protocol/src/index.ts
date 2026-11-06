@@ -201,7 +201,8 @@ export type ServerMessage =
   | { type: 'task.rejected'; requestId: string; message: string }
   | { type: 'collabs'; collabs: Collaboration[] }
   | { type: 'collab'; collab: Collaboration }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | ServerMessage15;
 
 export type ClientMessage =
   | { type: 'updates.check' }
@@ -221,7 +222,8 @@ export type ClientMessage =
    * Reply to the agent of a finished task: it continues in the same session, with what it
    * already knows. Only the task id is sent; the daemon finds the session itself.
    */
-  | { type: 'task.reply'; taskId: string; prompt: string; access: Access; model?: string; effort?: string; requestId?: string };
+  | { type: 'task.reply'; taskId: string; prompt: string; access: Access; model?: string; effort?: string; requestId?: string }
+  | ClientMessage15;
 
 export const DAEMON_PORT = 4317;
 
@@ -257,3 +259,297 @@ export function describeModel(source: Source, model?: string): ModelInfo {
   if (source === 'claude') return { kind: 'claude', label: model || 'Claude' };
   return { kind: 'codex', label: model || 'Codex' };
 }
+
+// ───────────────────────── land.inc 1.5 ─────────────────────────
+
+/** A model as the unified catalog lists it: one entry per CLI model, with what it can do. */
+export interface CatalogModel extends ModelOption {
+  executor: Executor;
+  /** Where the entry came from: the CLI's own cache/config, a CLI listing command, or the built-in list. */
+  origin: 'cache' | 'config' | 'cli' | 'builtin';
+  /** Short capability badges, e.g. "reasoning", "fast", "vision", "alias". */
+  badges?: string[];
+}
+
+export interface ModelCatalog {
+  models: CatalogModel[];
+  scannedAt: number;
+  /** Per-CLI problems while scanning (missing cache, `agy models` failed…). */
+  notes: Partial<Record<Executor, string>>;
+}
+
+export type AgentRoleId = 'writer' | 'critic' | 'editor' | 'architect' | 'coder' | 'security' | 'custom';
+
+export const ROLE_LABEL: Record<AgentRoleId, string> = {
+  writer: 'Писатель', critic: 'Критик', editor: 'Редактор', architect: 'Архитектор', coder: 'Кодер', security: 'Безопасник', custom: 'Своя роль',
+};
+
+export type TemperaturePreset = 'strict' | 'balanced' | 'creative';
+export const TEMPERATURE: Record<TemperaturePreset, number> = { strict: 0.1, balanced: 0.5, creative: 0.85 };
+
+export type OverflowStrategy = 'compact' | 'trim' | 'file';
+
+/** «Тонкие настройки работы»: shared by custom agents and by single team steps. */
+export interface AdvancedSettings {
+  temperature: TemperaturePreset;
+  contextBudget: { maxInputChars: number; maxOutputChars: number; overflow: OverflowStrategy };
+  /** 0–3 automatic retries on network / CLI failures, exponential pause. */
+  retries: 0 | 1 | 2 | 3;
+  /** Step timeout in ms; null means no limit. */
+  timeoutMs: number | null;
+  allowedPaths: string[];
+  ignoredPaths: string[];
+  /** Extra CLI flags, each one from the provider's allow-list (see ALLOWED_CLI_FLAGS). */
+  cliFlags: string[];
+}
+
+export const DEFAULT_ADVANCED: AdvancedSettings = {
+  temperature: 'balanced',
+  contextBudget: { maxInputChars: 400_000, maxOutputChars: 400_000, overflow: 'compact' },
+  retries: 1,
+  timeoutMs: 15 * 60_000,
+  allowedPaths: [],
+  ignoredPaths: [],
+  cliFlags: [],
+};
+
+export const TIMEOUT_CHOICES: (number | null)[] = [2 * 60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000, null];
+
+/** Flags a user may add to a CLI run; anything else is refused by the daemon. */
+export const ALLOWED_CLI_FLAGS: Record<Executor, string[]> = {
+  claude: ['--verbose', '--fallback-model', '--max-turns'],
+  codex: ['--search', '--oss'],
+  antigravity: ['--verbose', '--no-color'],
+};
+
+export type McpId = 'markitdown' | 'context-budget' | 'strategic-compact' | 'agentic-shield';
+export const MCP_IDS: McpId[] = ['markitdown', 'context-budget', 'strategic-compact', 'agentic-shield'];
+
+export interface McpStatus {
+  id: McpId;
+  state: 'active' | 'missing' | 'installing' | 'failed';
+  enabled: boolean;
+  version?: string;
+  message?: string;
+}
+
+export interface Appearance {
+  /** Outfit colour, CSS hex. */
+  outfit: string;
+  accessory: 'none' | 'glasses' | 'headphones' | 'scarf' | 'cap' | 'badge';
+}
+
+/** A custom employee (CrewAI-style role / goal / backstory / expected output). */
+export interface AgentProfile {
+  id: string;
+  name: string;
+  role: AgentRoleId;
+  /** Role title when role is 'custom'. */
+  roleTitle?: string;
+  goal: string;
+  backstory: string;
+  expectedOutputFormat: string;
+  executor: Executor;
+  model: string;
+  effort?: string;
+  access: Access;
+  appearance: Appearance;
+  mcp: McpId[];
+  advanced: AdvancedSettings;
+  createdAt: number;
+  updatedAt: number;
+}
+export type AgentProfileDraft = Omit<AgentProfile, 'id' | 'createdAt' | 'updatedAt'> & { id?: string };
+
+// ── Teams (Переговорка 1.5) ──
+
+export type Topology = 'sequential' | 'critic-loop' | 'council' | 'manager';
+
+export type ArtifactKind =
+  | 'ArchitectureSpec' | 'ImplementationDiff' | 'VerificationReport' | 'SecurityAudit'
+  | 'ChapterOutline' | 'ChapterDraft' | 'ContinuityAndLogicCritique' | 'StylisticPolishedManuscript'
+  | 'Synthesis' | 'Plan' | 'Generic';
+
+export type Verdict = 'APPROVED' | 'NEEDS_REVISION';
+
+/** MetaGPT-style typed deliverable a step hands to the next one. */
+export interface StepArtifact {
+  kind: ArtifactKind;
+  /** Step that produced it. */
+  stepIndex: number;
+  iteration: number;
+  content: string;
+  verdict?: Verdict;
+  /** Characters, for the context meter. */
+  size: number;
+  at: number;
+}
+
+export type StepKind = 'worker' | 'critic' | 'fixer' | 'synthesizer' | 'manager';
+
+export interface TeamStepSpec {
+  /** Custom agent the step uses, when picked from «Сотрудники». */
+  agentId?: string;
+  title: string;
+  executor: Executor;
+  model: string;
+  effort?: string;
+  access: Access;
+  /** What the step must produce. */
+  produces: ArtifactKind;
+  /** Role in the topology. */
+  kind: StepKind;
+  advanced?: AdvancedSettings;
+}
+
+export interface TeamStep extends TeamStepSpec {
+  status: TurnStatus;
+  attempts: number;
+  taskId?: string;
+  error?: string;
+}
+
+/** State saved after every finished step: a run resumes from here (LangGraph-style). */
+export interface TeamCheckpoint {
+  stepIndex: number;
+  iteration: number;
+  artifacts: StepArtifact[];
+  at: number;
+}
+
+export interface TeamRun {
+  id: string;
+  prompt: string;
+  cwd: string;
+  topology: Topology;
+  /** ChatDev-style immutable anchor (world passport, glossary, API invariants) passed to every step. */
+  anchor: string;
+  maxIterations: number;
+  steps: TeamStep[];
+  artifacts: StepArtifact[];
+  checkpoints: TeamCheckpoint[];
+  iteration: number;
+  /** Step currently running (or the failed one). */
+  current?: number;
+  status: 'running' | 'stopping' | 'done' | 'failed' | 'stopped';
+  createdAt: number;
+  finishedAt?: number;
+  result?: string;
+  reason?: string;
+  presetId?: string;
+}
+
+export interface NewTeamRun {
+  prompt: string;
+  cwd: string;
+  topology: Topology;
+  anchor?: string;
+  maxIterations?: number;
+  steps: TeamStepSpec[];
+  presetId?: string;
+}
+
+export interface WorkflowPreset {
+  id: string;
+  name: string;
+  description: string;
+  topology: Topology;
+  steps: TeamStepSpec[];
+  builtin?: boolean;
+}
+
+// ── Settings (Настройки 1.5) ──
+
+export interface LandSettings {
+  general: {
+    theme: 'system' | 'dark' | 'light';
+    /** 0.8 – 1.4 */
+    uiScale: number;
+    fps: 30 | 60;
+    backgroundPowerSave: boolean;
+    residents: 'on' | 'calm' | 'off';
+    soundOnFinish: boolean;
+    browserNotifications: boolean;
+  };
+  providers: Record<Executor, { pathOverride?: string }>;
+  mcp: { enabled: Record<McpId, boolean>; compactThresholdChars: number };
+  teams: { maxConcurrentTasks: number; artifactsDir: string; autosaveDrafts: boolean; captureLimitChars: number };
+  security: { shieldEnabled: boolean };
+}
+
+export const DEFAULT_SETTINGS: LandSettings = {
+  general: { theme: 'system', uiScale: 1, fps: 60, backgroundPowerSave: true, residents: 'on', soundOnFinish: false, browserNotifications: false },
+  providers: { claude: {}, codex: {}, antigravity: {} },
+  mcp: { enabled: { markitdown: true, 'context-budget': true, 'strategic-compact': true, 'agentic-shield': true }, compactThresholdChars: 300_000 },
+  teams: { maxConcurrentTasks: 3, artifactsDir: '', autosaveDrafts: true, captureLimitChars: 400_000 },
+  security: { shieldEnabled: true },
+};
+
+export interface ProviderInfo {
+  executor: Executor;
+  available: boolean;
+  /** Resolved binary / entry point. */
+  path?: string;
+  version?: string;
+  note?: string;
+}
+
+export interface DoctorCheck {
+  id: string;
+  title: string;
+  status: 'ok' | 'warn' | 'fail';
+  detail: string;
+  /** Present when the daemon can fix it itself («Исправить автоматически»). */
+  fix?: string;
+}
+
+export interface ConversationMeta {
+  /** Root task id of the conversation. */
+  id: string;
+  title?: string;
+  pinned?: boolean;
+}
+
+export interface BackupFile {
+  format: 'land-backup';
+  version: '1.5';
+  exportedAt: number;
+  settings: LandSettings;
+  agents: AgentProfile[];
+  presets: WorkflowPreset[];
+  conversations: ConversationMeta[];
+}
+
+export type DeepPartial<T> = { [K in keyof T]?: T[K] extends (infer U)[] ? U[] : T[K] extends object ? DeepPartial<T[K]> : T[K] };
+
+export type ServerMessage15 =
+  | { type: 'models:updated'; catalog: ModelCatalog }
+  | { type: 'agents'; agents: AgentProfile[] }
+  | { type: 'settings'; settings: LandSettings; providers: ProviderInfo[]; mcp: McpStatus[] }
+  | { type: 'mcp'; mcp: McpStatus[] }
+  | { type: 'teams'; runs: TeamRun[]; presets: WorkflowPreset[] }
+  | { type: 'team:updated'; run: TeamRun }
+  | { type: 'conversations.meta'; meta: ConversationMeta[] }
+  | { type: 'doctor'; checks: DoctorCheck[]; at: number }
+  | { type: 'backup'; requestId: string; backup?: BackupFile; error?: string }
+  | { type: 'ack'; requestId: string; ok: boolean; message?: string };
+
+export type ClientMessage15 =
+  | { type: 'models.rescan' }
+  | { type: 'agents.save'; agent: AgentProfileDraft; requestId?: string }
+  | { type: 'agents.delete'; id: string }
+  | { type: 'agents.duplicate'; id: string }
+  | { type: 'settings.update'; patch: DeepPartial<LandSettings>; requestId?: string }
+  | { type: 'mcp.install'; id: McpId }
+  | { type: 'team.start'; run: NewTeamRun; requestId?: string }
+  | { type: 'team.resume'; id: string; fromStep: number; override?: Partial<Pick<TeamStepSpec, 'executor' | 'model' | 'effort'>>; requestId?: string }
+  | { type: 'team.stop'; id: string }
+  | { type: 'preset.save'; preset: WorkflowPreset; requestId?: string }
+  | { type: 'preset.delete'; id: string }
+  | { type: 'conversation.meta'; meta: ConversationMeta }
+  | { type: 'doctor.run' }
+  | { type: 'doctor.fix'; id: string }
+  | { type: 'backup.export'; requestId: string }
+  | { type: 'backup.import'; requestId: string; backup: BackupFile }
+  | { type: 'token.rotate'; requestId?: string }
+  | { type: 'cache.clear'; requestId?: string };

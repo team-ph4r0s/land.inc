@@ -2,8 +2,11 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { Collaboration, NewTask, Task } from '@land/protocol';
-import { createTeamCoordinator, handoffText, buildPrompt, MAX_PARTICIPANTS } from './team.ts';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Collaboration, NewTask, NewTeamRun, Task, TeamRun, TeamStepSpec } from '@land/protocol';
+import { createTeamCoordinator, handoffText, buildPrompt, MAX_PARTICIPANTS, createTeamRunner, parseVerdict, parseAssignments, BUILTIN_PRESETS } from './team.ts';
 
 test('team forwards actual answers in three bounded turns and stops', () => {
   const created: NewTask[] = [];
@@ -345,4 +348,240 @@ test('a long-running team is never pushed out of the history by newer finished o
   assert.ok(list.some((c) => c.id === long.id && c.status === 'running'));
   finish(1, 'done'); // the long team still hands over
   assert.equal(coordinator.list().find((c) => c.id === long.id)!.turns[1].status, 'running');
+});
+
+// ───────────────────────── 1.5: graph runs ─────────────────────────
+
+function runnerWithStub(opts: { file?: string | null } = {}) {
+  const created: (NewTask & { id: string })[] = [];
+  const results = new Map<string, string>();
+  const cancelled: string[] = [];
+  const updates: TeamRun[] = [];
+  const models = (ids: string[]) => ids.map((id) => ({ id, label: id, efforts: ['low', 'high'] }));
+  const config = { executors: {
+    claude: { available: true, models: models(['claude-sonnet-4-6', 'claude-opus-4-6']) },
+    codex: { available: true, models: models(['gpt-6.1-sol', 'gpt-5.4']) },
+    antigravity: { available: true, models: models(['gemini-3.8-flash']) },
+  } };
+  const dir = mkdtempSync(join(tmpdir(), 'land-run-'));
+  const board = {
+    config: () => config,
+    create: (input: NewTask) => {
+      const task = { ...input, id: `t${created.length + 1}` };
+      created.push(task);
+      return { ...task, status: 'running', createdAt: 1 } as Task;
+    },
+    cancel: (id: string) => { cancelled.push(id); },
+    fullResult: (id: string) => results.get(id),
+  };
+  const runner = createTeamRunner(board, { file: opts.file ?? null, retryBaseMs: 0, onRun: (r) => updates.push(r), artifactsDir: (r) => join(dir, r.id) });
+  const finish = (id: string, status: Task['status'], result = '') => {
+    results.set(id, result);
+    const input = created.find((t) => t.id === id)!;
+    return runner.onTask({ ...input, status, result: result.slice(0, 2_000), createdAt: 1 } as Task);
+  };
+  const last = () => updates.at(-1)!;
+  return { runner, created, finish, cancelled, last, config };
+}
+
+const step = (s: Partial<TeamStepSpec> & Pick<TeamStepSpec, 'executor' | 'kind'>): TeamStepSpec =>
+  ({ title: s.kind, model: '', access: 'read', produces: 'Generic', ...s });
+
+test('book bureau: a 15 000+ character chapter goes Claude → Codex → Antigravity without losing a paragraph', () => {
+  const { runner, created, finish, last } = runnerWithStub();
+  const paragraphs = Array.from({ length: 60 }, (_, i) => `Абзац ${i + 1}. Мира Солнцева идёт по Северной дороге к маяку Эльсинор, и ветер несёт запах соли. ${'Текст главы. '.repeat(20)}`);
+  const chapter = paragraphs.join('\n\n').trim();
+  assert.ok(chapter.length > 15_000);
+  const anchor = 'Героиня: Мира Солнцева. Маяк: Эльсинор. Время: осень.';
+  runner.start({ prompt: 'Напиши главу 3', cwd: 'C:/book', topology: 'critic-loop', anchor, maxIterations: 3, steps: BUILTIN_PRESETS[0].steps });
+  assert.deepEqual(created.map((t) => t.executor), ['claude']);
+  finish('t1', 'done', `АРТЕФАКТ: ChapterDraft\n${chapter}`);
+
+  // The critic gets the whole chapter through a file: it does not fit the board's prompt limit.
+  const critic = created[1];
+  assert.equal(critic.executor, 'codex');
+  assert.equal(critic.access, 'read');
+  assert.ok(critic.prompt.length < 20_000);
+  const path = critic.prompt.match(/Прочитай файл ЦЕЛИКОМ перед работой:\n(.+)/)![1].trim();
+  assert.equal(readFileSync(path, 'utf8'), chapter);
+  assert.match(critic.prompt, /ВЕРДИКТ: APPROVED/);
+  finish('t2', 'done', 'АРТЕФАКТ: ContinuityAndLogicCritique\nВ абзаце 12 маяк назван иначе.\nВЕРДИКТ: NEEDS_REVISION');
+
+  // The editor gets the draft and the critique, and must return the full text.
+  const editor = created[2];
+  assert.equal(editor.executor, 'antigravity');
+  assert.match(editor.prompt, /ContinuityAndLogicCritique/);
+  assert.match(editor.prompt, /В абзаце 12 маяк назван иначе/);
+  assert.match(editor.prompt, /ПОЛНЫЙ исправленный текст/);
+  const fixed = chapter.replace('Абзац 12.', 'Абзац 12 (исправлен).');
+  finish('t3', 'done', `АРТЕФАКТ: StylisticPolishedManuscript\n${fixed}`);
+
+  assert.equal(created[3].executor, 'codex'); // the critic validates again
+  finish('t4', 'done', 'Противоречий нет.\nВЕРДИКТ: APPROVED');
+  const run = last();
+  assert.equal(run.status, 'done');
+  assert.equal(run.iteration, 2);
+  assert.equal(run.result, fixed);
+  for (let i = 1; i <= paragraphs.length; i++) assert.ok(run.result!.includes(`Абзац ${i}`), `Абзац ${i}`);
+  // The anchor travels with every step, unchanged.
+  for (const t of created) assert.ok(t.prompt.includes(anchor));
+  assert.deepEqual(run.artifacts.map((a) => [a.kind, a.verdict]), [
+    ['ChapterDraft', undefined], ['ContinuityAndLogicCritique', 'NEEDS_REVISION'], ['StylisticPolishedManuscript', undefined], ['ContinuityAndLogicCritique', 'APPROVED'],
+  ]);
+});
+
+test('critic-refine loop returns work for revision until APPROVED or the iteration limit', () => {
+  const { runner, created, finish, last } = runnerWithStub();
+  const steps = [step({ executor: 'claude', kind: 'worker' }), step({ executor: 'codex', kind: 'critic' })];
+  runner.start({ prompt: 'Код', cwd: 'C:/p', topology: 'critic-loop', maxIterations: 2, steps });
+  finish('t1', 'done', 'вариант 1');
+  finish('t2', 'done', 'баг\nВЕРДИКТ: NEEDS_REVISION');
+  // Without a fixer the author revises.
+  assert.equal(created[2].executor, 'claude');
+  assert.match(created[2].prompt, /баг/);
+  finish('t3', 'done', 'вариант 2');
+  finish('t4', 'done', 'всё ещё баг\nВЕРДИКТ: NEEDS_REVISION');
+  assert.equal(created.length, 4);
+  assert.equal(last().status, 'done');
+  assert.equal(last().result, 'вариант 2');
+  assert.match(last().reason!, /Лимит итераций \(2\)/);
+  assert.equal(parseVerdict('ВЕРДИКТ: NEEDS_REVISION … потом ВЕРДИКТ: approved'), 'APPROVED');
+  assert.equal(parseVerdict('без вердикта'), 'NEEDS_REVISION');
+});
+
+test('resume from checkpoint: a failure on step 3 continues from step 3 without re-running steps 1 and 2', () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'land-runs-')), 'team-runs.json');
+  const first = runnerWithStub({ file });
+  const steps = [
+    step({ executor: 'claude', kind: 'worker', produces: 'ArchitectureSpec' }),
+    step({ executor: 'codex', kind: 'worker', produces: 'ImplementationDiff' }),
+    step({ executor: 'antigravity', kind: 'critic', produces: 'VerificationReport' }),
+  ];
+  const run = first.runner.start({ prompt: 'Фича', cwd: 'C:/p', topology: 'sequential', steps });
+  first.finish('t1', 'done', 'спека');
+  first.finish('t2', 'done', 'дифф');
+  first.finish('t3', 'failed', 'network error: ECONNRESET');
+  assert.equal(first.last().status, 'failed');
+  assert.equal(first.last().current, 2);
+  assert.equal(first.last().checkpoints.length, 2);
+
+  // A new daemon reads the checkpoint from disk; the user switches step 3 to another model on the fly.
+  const second = runnerWithStub({ file });
+  const resumed = second.runner.resume(run.id, 2, { executor: 'codex', model: 'gpt-5.4' });
+  assert.equal(second.created.length, 1);
+  assert.equal(second.created[0].executor, 'codex');
+  assert.equal(second.created[0].model, 'gpt-5.4');
+  assert.match(second.created[0].prompt, /спека/);
+  assert.match(second.created[0].prompt, /дифф/);
+  assert.deepEqual(resumed.steps.map((s) => s.status), ['done', 'done', 'running']);
+  assert.throws(() => second.runner.resume(run.id, 2), /ещё работает/);
+  second.finish('t1', 'done', 'проверено\nВЕРДИКТ: APPROVED');
+  assert.equal(second.last().status, 'done');
+  assert.equal(second.last().artifacts.length, 3);
+});
+
+test('a run interrupted by a daemon restart is resumable from its step', () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'land-runs-')), 'team-runs.json');
+  const first = runnerWithStub({ file });
+  const run = first.runner.start({ prompt: 'Фича', cwd: 'C:/p', topology: 'sequential', steps: [step({ executor: 'claude', kind: 'worker' }), step({ executor: 'codex', kind: 'worker' })] });
+  first.finish('t1', 'done', 'часть 1');
+  const second = runnerWithStub({ file });
+  const saved = second.runner.list().find((r) => r.id === run.id)!;
+  assert.equal(saved.status, 'failed');
+  assert.match(saved.reason!, /Продолжите с этого шага/);
+  second.runner.resume(run.id, 1);
+  assert.equal(second.created.length, 1);
+  assert.match(second.created[0].prompt, /часть 1/);
+});
+
+test('parallel council: members run at once, the synthesizer merges every proposal', () => {
+  const { runner, created, finish, last } = runnerWithStub();
+  runner.start({ prompt: 'Архитектура', cwd: 'C:/p', topology: 'council', steps: BUILTIN_PRESETS[2].steps });
+  assert.deepEqual(created.map((t) => t.executor), ['claude', 'codex', 'antigravity']);
+  assert.ok(created.every((t) => t.access === 'read'));
+  finish('t2', 'done', 'вариант Codex');
+  finish('t1', 'done', 'вариант Claude');
+  assert.equal(created.length, 3); // the synthesizer waits for every member
+  finish('t3', 'done', 'вариант Antigravity');
+  const synth = created[3];
+  for (const v of ['вариант Claude', 'вариант Codex', 'вариант Antigravity']) assert.match(synth.prompt, new RegExp(v));
+  finish('t4', 'done', 'АРТЕФАКТ: Synthesis\nлучшее из трёх');
+  assert.equal(last().status, 'done');
+  assert.equal(last().result, 'лучшее из трёх');
+});
+
+test('a failed council member stops its siblings and the run resumes from that member', () => {
+  const { runner, created, finish, cancelled, last } = runnerWithStub();
+  const run = runner.start({ prompt: 'x', cwd: 'C:/p', topology: 'council', steps: BUILTIN_PRESETS[2].steps });
+  finish('t1', 'done', 'A');
+  finish('t2', 'failed', 'rate limit');
+  assert.deepEqual(cancelled, ['t3']);
+  finish('t3', 'cancelled');
+  assert.equal(last().status, 'failed');
+  runner.resume(run.id, 1);
+  assert.deepEqual(created.slice(3).map((t) => t.executor), ['codex', 'antigravity']);
+});
+
+test('hierarchical manager: decomposes, assigns subtasks to specialists and assembles the result', () => {
+  const { runner, created, finish, last } = runnerWithStub();
+  runner.start({ prompt: 'Большой проект', cwd: 'C:/p', topology: 'manager', steps: BUILTIN_PRESETS[3].steps });
+  assert.match(created[0].prompt, /JSON-массив/);
+  finish('t1', 'done', 'План.\n```json\n[{"step": 1, "subtask": "Напиши парсер"}, {"step": 2, "subtask": "Найди аналоги"}]\n```');
+  assert.match(created[1].prompt, /Напиши парсер/);
+  assert.match(created[2].prompt, /Найди аналоги/);
+  finish('t2', 'done', 'парсер готов');
+  finish('t3', 'done', 'аналоги найдены');
+  assert.equal(created[3].executor, 'claude');
+  assert.match(created[3].prompt, /парсер готов/);
+  assert.match(created[3].prompt, /аналоги найдены/);
+  finish('t4', 'done', 'итоговый проект');
+  assert.equal(last().status, 'done');
+  assert.equal(last().result, 'итоговый проект');
+  assert.deepEqual([...parseAssignments('нет плана', [1, 2]).keys()], [1, 2]);
+});
+
+test('auto-retry, step timeout and user stop', async () => {
+  const { runner, created, finish, cancelled, last } = runnerWithStub();
+  const advanced = { temperature: 'strict' as const, contextBudget: { maxInputChars: 19_000, maxOutputChars: 100_000, overflow: 'compact' as const }, retries: 1 as const, timeoutMs: 30, allowedPaths: [], ignoredPaths: [], cliFlags: [] };
+  const run = runner.start({ prompt: 'x', cwd: 'C:/p', topology: 'sequential', steps: [step({ executor: 'codex', kind: 'worker', advanced })] });
+  assert.match(created[0].prompt, /строгий/);
+  finish('t1', 'failed', 'stream disconnected');
+  assert.equal(created.length, 2); // retried once
+  await new Promise((r) => setTimeout(r, 80));
+  assert.deepEqual(cancelled, ['t2']); // timed out
+  finish('t2', 'cancelled');
+  assert.equal(last().status, 'failed');
+  assert.match(last().reason!, /Тайм-аут/);
+
+  runner.resume(run.id, 0);
+  runner.stop(run.id);
+  assert.deepEqual(cancelled, ['t2', 't3']);
+  finish('t3', 'cancelled');
+  assert.equal(last().status, 'stopped');
+});
+
+test('invalid team shapes, unavailable models and empty artifacts are rejected', () => {
+  const { runner, config, finish, last } = runnerWithStub();
+  const base: NewTeamRun = { prompt: 'x', cwd: 'C:/p', topology: 'council', steps: [step({ executor: 'claude', kind: 'worker' })] };
+  assert.throws(() => runner.start(base), /синтезатор/);
+  assert.throws(() => runner.start({ ...base, topology: 'critic-loop' }), /критик/);
+  assert.throws(() => runner.start({ ...base, topology: 'sequential', steps: [step({ executor: 'claude', kind: 'worker', model: 'bad id; rm -rf' })] }), /некорректный ID/);
+  assert.throws(() => runner.start({ ...base, topology: 'sequential', steps: [step({ executor: 'claude', kind: 'worker', model: 'claude-opus-4-6', effort: 'max' })] }), /уровень рассуждений/);
+  config.executors.antigravity.available = false;
+  assert.throws(() => runner.start({ ...base, topology: 'sequential', steps: [step({ executor: 'antigravity', kind: 'worker' })] }), /antigravity/);
+  runner.start({ ...base, topology: 'sequential', steps: [step({ executor: 'claude', kind: 'worker', produces: 'ChapterDraft' })] });
+  finish('t1', 'done', 'коротко');
+  assert.equal(last().status, 'failed');
+  assert.match(last().reason!, /слишком короткий/);
+});
+
+test('workflow presets: built-ins are fixed, custom ones persist', () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'land-runs-')), 'team-runs.json');
+  const { runner } = runnerWithStub({ file });
+  assert.throws(() => runner.savePreset({ ...BUILTIN_PRESETS[0] }), /Встроенный/);
+  const saved = runner.savePreset({ id: '', name: 'Мой', description: '', topology: 'sequential', steps: [step({ executor: 'codex', kind: 'worker' })] });
+  const again = runnerWithStub({ file }).runner;
+  assert.ok(again.presets().some((p) => p.id === saved.id && p.name === 'Мой'));
+  again.deletePreset(saved.id);
+  assert.ok(!runnerWithStub({ file }).runner.presets().some((p) => p.id === saved.id));
 });

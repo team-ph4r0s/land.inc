@@ -28,10 +28,12 @@ export class JsonlTail {
       // Truncated or rewritten: start over.
       this.offset = 0;
       this.rest = '';
+      this.decoder = new TextDecoder();
     }
     if (size === this.offset) return [];
 
-    const fd = openSync(this.path, 'r');
+    let fd: number;
+    try { fd = openSync(this.path, 'r'); } catch { return []; }
     const chunks: string[] = [];
     try {
       const buf = Buffer.allocUnsafe(1 << 20);

@@ -11,6 +11,10 @@ import { TaskBoardPanel } from './board';
 import { MeetingPanel } from './meeting';
 import { DnsPanel } from './dns';
 import { UpdatePanel } from './updates';
+import { SettingsPanel } from './settings';
+import { McpMenuComponent } from './mcp-menu';
+import { store } from './store';
+import { notifyDesktop, playCompletionChime, showToast } from './ui-kit';
 import './style.css';
 
 const stage = document.getElementById('stage')!;
@@ -79,23 +83,74 @@ const states = new Map<string, AgentState>();
 const logs = new Map<string, LogEntry[]>();
 let selected: string | undefined;
 
-const sidebar = new Sidebar(document.getElementById('sidebar')!, (id) => select(id));
-office.onSelect = (id) => select(id);
-office.onBoard = () => sidebar.show('tasks');
 let send: ReturnType<typeof connect> = () => false;
+
+const sidebar = new Sidebar(document.getElementById('sidebar')!, (id) => select(id), (m) => send(m));
+office.onSelect = (id) => {
+  select(id);
+  sidebar.show('office');
+};
+office.onBoard = () => sidebar.show('tasks');
+
 const board = new TaskBoardPanel(sidebar.tasksPane, (m) => send(m), (id) => {
   sidebar.show('office');
   if (selected !== id) select(id);
 });
-sidebar.onConversation = (id) => { board.openForAgent(id); sidebar.show('tasks'); };
+sidebar.onConversation = (id) => {
+  board.openForAgent(id);
+  sidebar.show('tasks');
+};
+
 const meeting = new MeetingPanel(sidebar.teamPane, (m) => send(m), (id) => {
   sidebar.show('office');
   if (selected !== id) select(id);
 });
+
 const dns = new DnsPanel(sidebar.dnsPane, (m) => send(m));
 const updatePanel = new UpdatePanel(sidebar.updatesPane, (m) => send(m));
+const settingsPanel = new SettingsPanel(sidebar.settingsPane, (m) => send(m));
+
+// Mount MCP header menu
+const appBar = document.querySelector<HTMLElement>('.app-bar')!;
+new McpMenuComponent(appBar, (m) => send(m));
+
 document.getElementById('office-version')!.addEventListener('click', () => sidebar.show('updates'));
+document.getElementById('settings-toggle')?.addEventListener('click', () => sidebar.show('settings'));
 office.onUpdate = () => sidebar.show('updates');
+
+settingsPanel.onThemeChange = (theme) => {
+  applyTheme(theme === 'system' ? undefined : theme);
+  repaintScene();
+};
+settingsPanel.onScaleChange = (scale) => {
+  document.documentElement.style.setProperty('--ui-scale', String(scale));
+};
+settingsPanel.onFpsChange = (fps) => {
+  app.ticker.maxFPS = fps;
+};
+settingsPanel.onResidentsChange = (mode) => {
+  office.residents.setMode(mode);
+};
+
+sidebar.onFocusAgent = (agentId) => {
+  const sprite = office.agents.get(agentId) ?? [...office.agents.values()][0];
+  if (sprite) {
+    focus(sprite.pos.x, sprite.pos.y);
+  } else {
+    focus(10, 8);
+  }
+};
+
+sidebar.onAssignTask = (agent) => {
+  board.openForAgentProfile(agent);
+  sidebar.show('tasks');
+};
+
+sidebar.onJoinTeam = (agent) => {
+  meeting.addStepFromEmployee(agent.id);
+  sidebar.show('team');
+};
+
 let installedVersion: string | undefined;
 const syncBoard = () => {
   board.setAgents(new Set(states.keys()));
@@ -116,12 +171,64 @@ function select(id: string | undefined): void {
 send = connect(
   (m) => {
     switch (m.type) {
+      case 'models:updated':
+        store.setCatalog(m.catalog);
+        return;
+      case 'agents':
+        store.setAgents(m.agents);
+        return;
+      case 'settings':
+        store.setSettings(m.settings, m.providers, m.mcp);
+        if (m.settings.general.theme) {
+          applyTheme(m.settings.general.theme === 'system' ? undefined : m.settings.general.theme);
+          repaintScene();
+        }
+        document.documentElement.style.setProperty('--ui-scale', String(m.settings.general.uiScale));
+        app.ticker.maxFPS = m.settings.general.fps;
+        office.residents.setMode(m.settings.general.residents);
+        return;
+      case 'mcp':
+        store.setMcp(m.mcp);
+        return;
+      case 'teams':
+        store.setTeams(m.runs, m.presets);
+        meeting.setTeams(m.runs, m.presets);
+        office.setTeamRuns(m.runs);
+        syncBoard();
+        return;
+      case 'team:updated':
+        store.updateTeamRun(m.run);
+        meeting.updateTeamRun(m.run);
+        office.teamRun(m.run);
+        syncBoard();
+        if (m.run.status === 'done') {
+          if (store.settings.general.soundOnFinish) playCompletionChime();
+          if (store.settings.general.browserNotifications) notifyDesktop('Команда завершила работу', m.run.prompt);
+        }
+        return;
+      case 'conversations.meta':
+        store.setConversationsMeta(m.meta);
+        return;
+      case 'doctor':
+        store.setDoctorChecks(m.checks);
+        return;
+      case 'backup':
+        settingsPanel.handleBackupResult(m.requestId, m.backup, m.error);
+        return;
+      case 'ack':
+        if (store.resolveAck(m.requestId, m.ok, m.message)) return;
+        if (!m.ok && m.message) {
+          showToast(m.message, 'bad');
+        }
+        return;
       case 'updates': {
         if (installedVersion && installedVersion !== m.state.current) {
-          // The daemon can reconnect before Vite is listening. Reload only after
-          // the supervisor confirms that both parts of the new office are ready.
-          if (m.state.phase === 'switching' || m.state.phase === 'preparing') { updatePanel.set(m.state); return; }
-          location.reload(); return;
+          if (m.state.phase === 'switching' || m.state.phase === 'preparing') {
+            updatePanel.set(m.state);
+            return;
+          }
+          location.reload();
+          return;
         }
         installedVersion = m.state.current;
         updatePanel.set(m.state);
@@ -137,6 +244,7 @@ send = connect(
       case 'board':
         board.setBoard(m.config, m.tasks);
         meeting.setModels(Object.values(m.config.executors).flatMap((e) => e.models));
+        meeting.setProjects(m.config.projects);
         syncBoard();
         return;
       case 'collabs':
@@ -152,6 +260,10 @@ send = connect(
       case 'task':
         board.upsert(m.task);
         syncBoard();
+        if (m.task.status === 'done') {
+          if (store.settings.general.soundOnFinish) playCompletionChime();
+          if (store.settings.general.browserNotifications) notifyDesktop('Задача завершена', m.task.prompt);
+        }
         return;
       case 'error':
         board.showError(m.message);
@@ -160,9 +272,11 @@ send = connect(
         board.foldersResult(m);
         break;
       case 'task.accepted':
+        if (store.resolveAck(m.requestId, true)) return;
         board.submissionResult(m.requestId);
         return;
       case 'task.rejected':
+        if (store.resolveAck(m.requestId, false, m.message)) return;
         board.submissionResult(m.requestId, m.message);
         return;
       case 'snapshot':
@@ -194,8 +308,24 @@ send = connect(
     sidebar.scheduleRender(states, logs, selected);
     if (m.type !== 'log') syncBoard();
   },
-  (online) => { sidebar.setOnline(online); dns.setOnline(online); updatePanel.setOnline(online); if (!online) board.disconnected(); },
+  (online) => {
+    sidebar.setOnline(online);
+    dns.setOnline(online);
+    updatePanel.setOnline(online);
+    if (!online) board.disconnected();
+  },
 );
+
+sidebar.setSend((m) => send(m));
+
+// Background Power Save handling
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && store.settings.general.backgroundPowerSave) {
+    app.ticker.maxFPS = 10;
+  } else {
+    app.ticker.maxFPS = store.settings.general.fps;
+  }
+});
 
 app.ticker.add((t) => {
   const dt = Math.min(t.deltaMS / 1000, 0.1);
@@ -207,7 +337,6 @@ app.ticker.add((t) => {
 let zoom = 1;
 const MIN_ZOOM = 0.08;
 const MAX_ZOOM = 3;
-/** Zoom to `next` keeping the point (mx, my) of the stage in place. */
 function zoomAt(next: number, mx: number, my: number): void {
   next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, next));
   world.position.set(mx - ((mx - world.x) * next) / zoom, my - ((my - world.y) * next) / zoom);

@@ -127,6 +127,8 @@ export class OfficeResidents {
   private sprites: ResidentSprite[];
   private t = 0;
   private zoom = 1;
+  private calm = false;
+  private enabled = true;
   private reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
   constructor(world: Container, random = Math.random) {
     this.life = new ResidentLife(findPath, random);
@@ -134,10 +136,17 @@ export class OfficeResidents {
     this.update(0, []);
   }
   setZoom(zoom: number): void { this.zoom = zoom; }
+  setMode(mode: 'on' | 'calm' | 'off'): void {
+    this.enabled = mode !== 'off';
+    this.calm = mode === 'calm';
+    for (const s of this.sprites) s.view.visible = this.enabled;
+  }
   update(dt: number, agents: Tile[]): void {
+    if (!this.enabled) return;
     this.t += dt;
-    this.life.update(dt, agents, this.reducedMotion.matches);
+    const isCalm = this.calm || this.reducedMotion.matches;
+    this.life.update(dt, agents, isCalm);
     const cast = this.life.scene && !this.life.scene.gathering ? this.life.people.filter((r) => this.life.participants.includes(r.id)) : [];
-    this.sprites.forEach((sprite, i) => sprite.paint(this.t, this.reducedMotion.matches, this.zoom, Math.floor(this.t / 6) % 3 === i, cast.includes(sprite.state) ? cast.indexOf(sprite.state) : undefined));
+    this.sprites.forEach((sprite, i) => sprite.paint(this.t, isCalm, this.zoom, Math.floor(this.t / 6) % 3 === i, cast.includes(sprite.state) ? cast.indexOf(sprite.state) : undefined));
   }
 }

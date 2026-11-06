@@ -2,6 +2,7 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 
 function Get-LandDnsFamily($adapter, [string]$family) {
     $service = if ($family -eq 'IPv4') { 'Tcpip' } else { 'Tcpip6' }
@@ -14,13 +15,51 @@ function Get-LandDnsFamily($adapter, [string]$family) {
             $mode = if (($value -join ',').Trim()) { 'manual' } else { 'auto' }
         }
     } catch { }
-    $row = @(Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily $family -ErrorAction SilentlyContinue)
-    if (-not $row.Count) { return @{ mode = 'unknown'; servers = @() } }
-    return @{ mode = $mode; servers = @($row.ServerAddresses | Where-Object { $_ }) }
+    if ($adapter.Properties) {
+        $expected = if ($family -eq 'IPv4') { [System.Net.Sockets.AddressFamily]::InterNetwork } else { [System.Net.Sockets.AddressFamily]::InterNetworkV6 }
+        $addresses = @($adapter.Properties.DnsAddresses | Where-Object AddressFamily -eq $expected | ForEach-Object { $_.ToString() })
+        return @{ mode = $mode; servers = $addresses }
+    }
+    try {
+        $row = @(Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily $family -ErrorAction Stop)
+        if ($row.Count) { return @{ mode = $mode; servers = @($row.ServerAddresses | Where-Object { $_ }) } }
+    } catch { }
+    return @{ mode = 'unknown'; servers = @() }
+}
+
+function Get-LandFallbackAdapters {
+    foreach ($item in [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+        try {
+            $properties = $item.GetIPProperties()
+            $index = try { $properties.GetIPv4Properties().Index } catch { $null }
+            if (-not $index) { $index = $properties.GetIPv6Properties().Index }
+            if ($index -gt 0) {
+                @{ InterfaceGuid = $item.Id; ifIndex = $index; Name = $item.Name; HardwareInterface = $false; Properties = $properties }
+            }
+        } catch { }
+    }
 }
 
 function Get-LandDnsAdapters {
-    return @(Get-NetAdapter -IncludeHidden | Where-Object Status -eq 'Up' | Sort-Object @{Expression='HardwareInterface';Descending=$true}, ifIndex | ForEach-Object {
+    $adapters = @{}
+    $sources = 0
+    try {
+        foreach ($item in @(Get-NetAdapter -IncludeHidden -ErrorAction Stop)) {
+            if ($item.InterfaceGuid -and $item.ifIndex -gt 0) {
+                $adapters[$item.InterfaceGuid.ToString().Trim('{}')] = $item
+            }
+        }
+        $sources++
+    } catch { }
+    try {
+        foreach ($item in @(Get-LandFallbackAdapters)) {
+            $id = $item.InterfaceGuid.ToString().Trim('{}')
+            if (-not $adapters.ContainsKey($id)) { $adapters[$id] = $item }
+        }
+        $sources++
+    } catch { }
+    if (-not $sources) { throw 'Unable to enumerate Windows network interfaces' }
+    return @($adapters.Values | Sort-Object @{Expression='HardwareInterface';Descending=$true}, ifIndex | ForEach-Object {
         @{
             id = $_.InterfaceGuid.ToString().Trim('{}').ToLowerInvariant()
             index = [int]$_.ifIndex
@@ -28,7 +67,7 @@ function Get-LandDnsAdapters {
             ipv4 = Get-LandDnsFamily $_ 'IPv4'
             ipv6 = Get-LandDnsFamily $_ 'IPv6'
         }
-    } | Where-Object { $_.ipv4.mode -ne 'unknown' -or $_.ipv6.mode -ne 'unknown' })
+    })
 }
 
 function Assert-LandDnsSettings($settings) {

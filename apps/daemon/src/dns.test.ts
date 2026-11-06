@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DnsService, FakeDnsBackend, validateDnsSettings } from './dns.ts';
+import { parseWindowsAdapters, DnsService, FakeDnsBackend, validateDnsSettings } from './dns.ts';
 import type { DnsSettings } from '@land/protocol';
 
 const manual: DnsSettings = { ipv4: { mode: 'manual', servers: ['192.0.2.1', '192.0.2.2'] }, ipv6: { mode: 'manual', servers: ['2001:db8::53'] } };
@@ -174,3 +174,26 @@ for (const [scenario, expectedCode] of [['success', 0], ['failure', 10], ['rollb
     assert.equal(result.status, expectedCode, result.stderr || result.error?.message);
   });
 }
+
+test('Windows adapter discovery preserves Cyrillic aliases and includes disabled and virtual interfaces', { skip: process.platform !== 'win32' }, () => {
+  const result = runPowerShell(`
+    function Get-NetAdapter {
+      param([switch]$IncludeHidden, $ErrorAction)
+      @(
+        @{ InterfaceGuid='{WiFi}'; ifIndex=1; Name='Беспроводная сеть'; HardwareInterface=$true; Status='Disconnected' },
+        @{ InterfaceGuid='{VPN}'; ifIndex=2; Name='Рабочий VPN'; HardwareInterface=$false; Status='Up' },
+        @{ InterfaceGuid='{LAN}'; ifIndex=3; Name='Подключение по локальной сети'; HardwareInterface=$true; Status='Disabled' }
+      )
+    }
+    function Get-LandFallbackAdapters { @() }
+    function Get-LandDnsFamily($adapter, $family) {
+      if ($family -eq 'IPv4') { return @{ mode='manual'; servers=@('192.0.2.53') } }
+      return @{ mode='auto'; servers=@('2001:db8::53') }
+    }
+    ConvertTo-Json -InputObject @(Get-LandDnsAdapters) -Depth 8 -Compress
+  `);
+  assert.equal(result.status, 0, result.stderr);
+  const adapters = parseWindowsAdapters(result.stdout);
+  assert.deepEqual(new Set(adapters.map((adapter) => adapter.name)), new Set(['Беспроводная сеть', 'Рабочий VPN', 'Подключение по локальной сети']));
+  assert.deepEqual(adapters[0].ipv6.servers, ['2001:db8::53']);
+});

@@ -1,3 +1,315 @@
-<!doctype html><html lang="ru"><meta charset="utf-8"><title>390px office viewport</title>
-<style>body{margin:0;background:#ddd}iframe{width:390px;height:844px;border:0;display:block}</style>
-<iframe title="Офис на телефоне" src="/"></iframe>
+<!doctype html>
+<html lang="ru" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <title>Office 1.5 Responsive & Theme Test Bench</title>
+  <link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+  <header class="test-header">
+    <div class="test-controls">
+      <h2>Office 1.5 Responsive Test Bench</h2>
+      <button type="button" class="btn small" data-act="theme-toggle" id="theme-btn">Тема: Тёмная</button>
+      <button type="button" class="btn small" data-w="360">360px</button>
+      <button type="button" class="btn small primary" data-w="390">390px (iPhone)</button>
+      <button type="button" class="btn small" data-w="480">480px</button>
+      <button type="button" class="btn small" data-w="768">768px (Tablet)</button>
+      <button type="button" class="btn small" data-w="auto">100%</button>
+      <button type="button" class="btn small" data-act="run-overflow-tests" id="run-audit-btn">Запустить аудит вёрстки</button>
+    </div>
+    <div id="audit-status" class="note">Готов к проверке</div>
+  </header>
+
+  <main class="test-layout">
+    <div id="results-box" hidden>
+      <h3>Результаты аудита переполнения (Zero Horizontal Overflow)</h3>
+      <table class="test-table" id="results-table">
+        <thead>
+          <tr>
+            <th>Вкладка</th>
+            <th>Ширина</th>
+            <th>Тема</th>
+            <th>scrollWidth / clientWidth</th>
+            <th>Результат</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div id="frame-wrapper" class="device-viewport-frame device-width-390 device-height-tall">
+      <div class="top-bar">
+        <span class="logo">land.inc 1.5</span>
+        <div id="mcp-host"></div>
+        <div class="status-summary">
+          <span class="badge ok">online</span>
+        </div>
+      </div>
+      <aside id="sidebar"></aside>
+    </div>
+  </main>
+
+<script type="module">
+import { TaskBoardPanel } from '/src/board.ts';
+import { Sidebar } from '/src/ui.ts';
+import { MeetingPanel } from '/src/meeting.ts';
+import { SettingsPanel } from '/src/settings.ts';
+import { McpMenuComponent } from '/src/mcp-menu.ts';
+import { store, BUILTIN_MODELS, BUILTIN_PRESETS } from '/src/store.ts';
+
+const send = (m) => {
+  console.log('[Test WS Send]', m);
+  return true;
+};
+
+// Initialize Store with complete 1.5 Mock Data
+const catalog = {
+  updatedAt: Date.now(),
+  models: [
+    { id: 'claude-3-7-sonnet', name: 'Claude 3.7 Sonnet', provider: 'claude', description: 'Гибридное мышление', contextTokens: 200000, maxOutputTokens: 64000, efforts: ['low', 'medium', 'high'] },
+    { id: 'claude-3-5-haiku', name: 'Claude 3.5 Haiku', provider: 'claude', description: 'Быстрый агент', contextTokens: 200000 },
+    { id: 'gpt-5-codex', name: 'GPT-5 Codex', provider: 'codex', description: 'Инженерная модель', contextTokens: 256000, efforts: ['low', 'high', 'xhigh'] },
+    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'antigravity', description: 'Глубокий анализ', contextTokens: 1000000 }
+  ],
+  aliases: { 'default': 'claude-3-7-sonnet' }
+};
+store.setCatalog(catalog);
+
+const agents = [
+  {
+    id: 'agent-claude',
+    name: 'Архитектор Клод',
+    role: 'architect',
+    goal: 'Проектировать архитектуру монорепозитория land.inc 1.5',
+    backstory: 'Системный эксперт. Специализируется на протоколах, масштабируемости, строгой типизации TypeScript и отказоустойчивых конвейерах.',
+    executor: 'claude',
+    model: 'claude-3-7-sonnet',
+    reasoningEffort: 'high',
+    access: 'full',
+    appearance: { outfit: '#d97757', accessory: 'glasses' },
+    mcpServers: ['github', 'filesystem'],
+    advanced: { temperature: 'strict', contextBudget: { maxInputChars: 400000, maxOutputChars: 64000, overflow: 'compact' }, retries: 2, timeoutMs: 900000, allowedPaths: ['src/**'], ignoredPaths: ['node_modules/**'], cliFlags: [] },
+    createdAt: Date.now() - 50000,
+    updatedAt: Date.now()
+  },
+  {
+    id: 'agent-codex',
+    name: 'Кодекс Разработчик',
+    role: 'coder',
+    goal: 'Реализовать чистые компоненты UI без inline-стилей',
+    backstory: 'Фанат строгого CSS и семантического HTML. Ненавидит style="..." и всегда использует CSS-переменные.',
+    executor: 'codex',
+    model: 'gpt-5-codex',
+    reasoningEffort: 'xhigh',
+    access: 'full',
+    appearance: { outfit: '#10a37f', accessory: 'cap' },
+    mcpServers: ['git'],
+    advanced: { temperature: 'balanced', contextBudget: { maxInputChars: 250000, maxOutputChars: 32000, overflow: 'trim' }, retries: 1, timeoutMs: 300000, allowedPaths: [], ignoredPaths: [], cliFlags: [] },
+    createdAt: Date.now() - 30000,
+    updatedAt: Date.now()
+  },
+  {
+    id: 'agent-gemini',
+    name: 'Антигравити Аналитик',
+    role: 'reviewer',
+    goal: 'Верифицировать качество кода и соответствие ТЗ',
+    backstory: 'Внимательный ревьюер с огромным контекстом.',
+    executor: 'antigravity',
+    model: 'gemini-2.5-pro',
+    access: 'read',
+    appearance: { outfit: '#4285f4', accessory: 'badge' },
+    mcpServers: ['github'],
+    advanced: { temperature: 'balanced', contextBudget: { maxInputChars: 1000000, maxOutputChars: 64000, overflow: 'file' }, retries: 0, timeoutMs: null, allowedPaths: [], ignoredPaths: [], cliFlags: [] },
+    createdAt: Date.now() - 10000,
+    updatedAt: Date.now()
+  }
+];
+store.setAgents(agents);
+
+const mcpList = [
+  { id: 'github', name: 'GitHub Integration', state: 'active', version: '1.4.2' },
+  { id: 'filesystem', name: 'Local FS Access', state: 'active', version: '2.0.0' },
+  { id: 'postgres', name: 'PostgreSQL DB', state: 'installing' },
+  { id: 'jira', name: 'Atlassian Jira', state: 'missing' },
+  { id: 'docker', name: 'Docker Engine', state: 'failed', error: 'daemon not running' }
+];
+store.setMcp(mcpList);
+
+const teamRuns = [
+  {
+    id: 'teamrun-rel-15',
+    title: 'Релиз land.inc 1.5',
+    topology: 'review-loop',
+    status: 'running',
+    startedAt: Date.now() - 60000,
+    currentStepIndex: 1,
+    currentIteration: 2,
+    maxIterations: 3,
+    steps: [
+      {
+        index: 0,
+        spec: { role: 'coder', agentId: 'agent-codex', model: 'gpt-5-codex', kind: 'write', produces: 'code' },
+        status: 'done',
+        startedAt: Date.now() - 60000,
+        finishedAt: Date.now() - 25000,
+        artifact: {
+          kind: 'code',
+          size: 4096,
+          summary: 'Готовы модули ui-kit.ts, mcp-menu.ts, settings.ts, meeting.ts',
+          verdict: 'APPROVED',
+          content: 'export * from "./ui-kit";\nexport * from "./mcp-menu";'
+        }
+      },
+      {
+        index: 1,
+        spec: { role: 'reviewer', agentId: 'agent-gemini', model: 'gemini-2.5-pro', kind: 'review', produces: 'review' },
+        status: 'running',
+        startedAt: Date.now() - 25000
+      }
+    ]
+  }
+];
+store.setTeams(teamRuns, BUILTIN_PRESETS);
+
+const doctorChecks = [
+  { id: 'cli-claude', title: 'Claude CLI', status: 'ok', detail: 'Claude Code 1.5.0 найден и активен' },
+  { id: 'cli-codex', title: 'Codex CLI', status: 'ok', detail: 'Codex CLI 1.5.0 готов к запуску' },
+  { id: 'cli-antigravity', title: 'Antigravity CLI', status: 'ok', detail: 'Antigravity CLI 2.0 обнаружен' },
+  { id: 'mcp-jira', title: 'MCP Jira', status: 'warn', detail: 'Плагин отсутствует в конфигурации', fix: true },
+  { id: 'mcp-docker', title: 'MCP Docker', status: 'fail', detail: 'Не удалось подключиться к Docker сокету' }
+];
+store.setDoctorChecks(doctorChecks);
+
+// Mount DOM Components
+const sidebarEl = document.querySelector('#sidebar');
+const sidebar = new Sidebar(sidebarEl, () => {}, send);
+
+// Mount MCP Menu in Top Bar
+const mcpHost = document.querySelector('#mcp-host');
+const mcpMenu = new McpMenuComponent(mcpHost, send);
+
+// Mount Meeting Panel
+const meetingPanel = new MeetingPanel(sidebar.teamPane, send);
+meetingPanel.updateCatalog(catalog);
+meetingPanel.setTeams(teamRuns, BUILTIN_PRESETS);
+
+// Mount Settings Panel
+const settingsPanel = new SettingsPanel(sidebar.settingsPane, send);
+
+// Mount Tasks Panel
+const boardPanel = new TaskBoardPanel(sidebar.tasksPane, send, () => {});
+const boardConfig = {
+  projects: ['C:/dev/land.inc'],
+  outsideGit: [],
+  executors: {
+    claude: { available: true, models: catalog.models.filter(m => m.provider === 'claude') },
+    codex: { available: true, models: catalog.models.filter(m => m.provider === 'codex') },
+    antigravity: { available: true, models: catalog.models.filter(m => m.provider === 'antigravity') }
+  }
+};
+const conversations = [
+  { id: 'c1', prompt: 'Проверить отсутствие inline-стилей', result: 'Проверено 100% файлов: везде классы и переменные!', cwd: 'C:/dev/land.inc', executor: 'codex', model: 'gpt-5-codex', access: 'full', status: 'done', createdAt: Date.now() - 100000, agentId: 'c1-agent', pinned: true },
+  { id: 'c2', prompt: 'Собрать проект и пройти тайпчек', result: 'tsc -p apps/daemon && tsc -p apps/office прошли успешно без ошибок.', cwd: 'C:/dev/land.inc', executor: 'claude', model: 'claude-3-7-sonnet', access: 'full', status: 'done', createdAt: Date.now() - 50000, agentId: 'c2-agent' }
+];
+boardPanel.setBoard(boardConfig, conversations);
+
+// Render Employees
+sidebar.renderAgents(new Map(), new Map());
+
+// Viewport width switcher
+const frameWrapper = document.querySelector('#frame-wrapper');
+document.querySelectorAll('[data-w]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('[data-w]').forEach(b => b.classList.remove('primary'));
+    btn.classList.add('primary');
+    const w = btn.dataset.w;
+    frameWrapper.className = 'device-viewport-frame device-height-tall ' + (w === 'auto' ? 'device-width-auto' : `device-width-${w}`);
+  });
+});
+
+// Theme switcher
+const themeBtn = document.querySelector('#theme-btn');
+themeBtn.addEventListener('click', () => {
+  const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  themeBtn.textContent = `Тема: ${next === 'dark' ? 'Тёмная' : 'Светлая'}`;
+});
+
+// Automated Layout & Horizontal Overflow Audit
+const runAuditBtn = document.querySelector('#run-audit-btn');
+const resultsBox = document.querySelector('#results-box');
+const resultsTbody = document.querySelector('#results-table tbody');
+const auditStatus = document.querySelector('#audit-status');
+
+async function runOverflowAudit() {
+  auditStatus.textContent = 'Выполняется аудит…';
+  resultsBox.hidden = false;
+  resultsTbody.innerHTML = '';
+
+  const widths = [360, 390, 768];
+  const themes = ['dark', 'light'];
+  const tabs = ['office', 'tasks', 'team', 'dns', 'settings', 'updates'];
+
+  let totalChecks = 0;
+  let passedChecks = 0;
+
+  for (const theme of themes) {
+    document.documentElement.setAttribute('data-theme', theme);
+    themeBtn.textContent = `Тема: ${theme === 'dark' ? 'Тёмная' : 'Светлая'}`;
+
+    for (const width of widths) {
+      frameWrapper.className = `device-viewport-frame device-height-tall device-width-${width}`;
+      // Allow browser reflow
+      await new Promise(r => setTimeout(r, 60));
+
+      for (const tab of tabs) {
+        sidebar.showTab(tab);
+        await new Promise(r => setTimeout(r, 30));
+
+        const pane = sidebarEl.querySelector(`.pane.${tab}`);
+        if (!pane) continue;
+
+        totalChecks++;
+        const sWidth = pane.scrollWidth;
+        const cWidth = pane.clientWidth;
+        const isOk = sWidth <= cWidth + 1; // 1px subpixel tolerance
+        if (isOk) passedChecks++;
+
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td><strong>${tab}</strong></td>
+          <td>${width}px</td>
+          <td>${theme}</td>
+          <td>${sWidth} / ${cWidth} px</td>
+          <td>
+            <span class="${isOk ? 'test-pill-pass' : 'test-pill-fail'}">
+              ${isOk ? 'PASS (0 overflow)' : `FAIL (+${sWidth - cWidth}px)`}
+            </span>
+          </td>
+        `;
+        resultsTbody.appendChild(tr);
+      }
+    }
+  }
+
+  // Restore 390px dark default
+  frameWrapper.className = 'device-viewport-frame device-height-tall device-width-390';
+  document.documentElement.setAttribute('data-theme', 'dark');
+  themeBtn.textContent = 'Тема: Тёмная';
+  sidebar.showTab('office');
+
+  const allPassed = passedChecks === totalChecks;
+  auditStatus.textContent = allPassed
+    ? `Аудит завершён: ВСЕ ${totalChecks} проверок успешно пройдены! 0 переполнений.`
+    : `Аудит выявил ошибки: ${totalChecks - passedChecks} из ${totalChecks} не прошли.`;
+  auditStatus.className = allPassed ? 'badge ok' : 'badge bad';
+}
+
+runAuditBtn.addEventListener('click', runOverflowAudit);
+
+// Auto-run audit on page load
+setTimeout(runOverflowAudit, 150);
+</script>
+</body>
+</html>

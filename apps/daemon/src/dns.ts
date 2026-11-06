@@ -1,13 +1,13 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { Resolver } from 'node:dns/promises';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { DnsAdapter, DnsFamily, DnsProbe, DnsSettings, DnsState } from '@land/protocol';
-import { readRecoverable, writeAtomic } from './tasks.ts';
+import { readJson, record, writeJson } from './json-store.ts';
 
 type Adapter = Omit<DnsAdapter, 'revision'>;
 export interface DnsBackend {
@@ -48,7 +48,7 @@ export class WindowsDnsBackend implements DnsBackend {
   async read(): Promise<Adapter[]> {
     try {
       const { stdout } = await exec(ps, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded(script() + '\nConvertTo-Json -InputObject @(Get-LandDnsAdapters) -Depth 8 -Compress')], { windowsHide: true, timeout: 30_000, encoding: 'utf8', maxBuffer: 512 * 1024 });
-      return JSON.parse(stdout.replace(/^\uFEFF/, '').trim());
+      return parseWindowsAdapters(stdout);
     } catch { throw new Error('Не удалось прочитать DNS Windows. Проверьте доступ к сетевым адаптерам и повторите обновление.'); }
   }
   async change(before: Adapter, settings: DnsSettings): Promise<void> {
@@ -96,15 +96,10 @@ export class DnsService {
   constructor(options: { backend?: DnsBackend; file?: string | null } = {}) {
     this.backend = options.backend ?? new WindowsDnsBackend();
     this.file = options.file === undefined ? join(homedir(), '.land', 'dns-backups.json') : options.file;
-    if (this.file && (existsSync(this.file) || existsSync(this.file + '.tmp'))) {
-      try {
-        const saved = JSON.parse(readRecoverable(this.file) ?? 'null');
-        if (!Array.isArray(saved) || saved.length > 100) throw new Error('Invalid backups');
-        this.backups = saved.map((b) => {
-          if (!b || typeof b.id !== 'string' || typeof b.name !== 'string' || !Number.isFinite(b.at)) throw new Error('Invalid backup');
-          return { id: b.id, name: b.name, at: b.at, settings: validateDnsSettings(b.settings) };
-        });
-      } catch { this.loadError = true; }
+    if (this.file && ['', '.tmp', '.bak'].some((suffix) => existsSync(this.file + suffix))) {
+      const saved = readJson(this.file, validBackups);
+      if (saved) this.backups = saved.map((b) => ({ ...b, settings: validateDnsSettings(b.settings) }));
+      else this.loadError = true;
     }
   }
   async state(): Promise<DnsState> {
@@ -154,7 +149,32 @@ export class DnsService {
   }
   private save(): void {
     if (!this.file) return;
-    mkdirSync(dirname(this.file), { recursive: true });
-    writeAtomic(this.file, JSON.stringify(this.backups, null, 2));
+    writeJson(this.file, this.backups, validBackups);
   }
+}
+
+export function parseWindowsAdapters(stdout: string): Adapter[] {
+  const value: unknown = JSON.parse(stdout.replace(/^\uFEFF/, '').trim());
+  if (!Array.isArray(value)) throw new Error('Некорректный список адаптеров');
+  return value.map((raw) => {
+    const row = record(raw);
+    if (!row || typeof row.id !== 'string' || typeof row.name !== 'string' ||
+      typeof row.index !== 'number' || !Number.isInteger(row.index)) throw new Error('Некорректный адаптер');
+    const family = (input: unknown, ip: 4 | 6): DnsFamily => {
+      const v = record(input);
+      if (!v || (v.mode !== 'auto' && v.mode !== 'manual' && v.mode !== 'unknown') || !Array.isArray(v.servers))
+        throw new Error('Некорректное состояние DNS');
+      const addresses = v.servers.filter((server): server is string => typeof server === 'string' && isIP(server) === ip);
+      return { mode: v.mode, servers: addresses };
+    };
+    return { id: row.id, name: row.name, index: row.index, ipv4: family(row.ipv4, 4), ipv6: family(row.ipv6, 6) };
+  });
+}
+
+function validBackups(value: unknown): value is DnsState['backups'] {
+  return Array.isArray(value) && value.length <= 100 && value.every((raw) => {
+    const row = record(raw);
+    if (!row || typeof row.id !== 'string' || typeof row.name !== 'string' || !Number.isFinite(row.at)) return false;
+    try { validateDnsSettings(row.settings); return true; } catch { return false; }
+  });
 }

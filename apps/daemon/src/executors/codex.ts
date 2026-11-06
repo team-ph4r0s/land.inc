@@ -1,16 +1,18 @@
-import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ModelOption, Task } from '@land/protocol';
-import { cliCommand, cliOnPath, headCwd, mtime } from './files.ts';
+import { findCli, headCwd, mtime } from './files.ts';
+import { codexModels } from '../model-catalog.ts';
+import { cliFailure, stripAnsi } from '../ansi.ts';
 import type { Command, Executor, ExecutorStatus, OutputParser, PreparedRun } from './types.ts';
 
-type Rec = Record<string, any>;
+import { record } from '../json-store.ts';
 
 export interface CodexOptions {
   /** Override the CLI, e.g. a fake one in tests. */
   command?: Command;
+  pathOverride?: () => string | undefined;
   /** Override the model list (tests); the default reads Codex's local model cache. */
   models?: ModelOption[];
 }
@@ -21,9 +23,11 @@ export class CodexExecutor implements Executor {
   private override?: Command;
   private models?: ModelOption[];
   private found?: Command | null;
+  private pathOverride?: () => string | undefined;
 
   constructor(options: CodexOptions = {}) {
     this.override = options.command;
+    this.pathOverride = options.pathOverride;
     this.models = options.models;
   }
 
@@ -32,18 +36,20 @@ export class CodexExecutor implements Executor {
   command(): Command | undefined {
     if (this.override) return this.override;
     if (this.found === undefined) {
-      this.found = codexBin() ?? null;
+      const path = this.pathOverride?.();
+      const candidates = path ? [path] : [process.env.LAND_CODEX_BIN].filter((value): value is string => !!value);
+      this.found = findCli('codex', '@openai/codex', candidates) ?? null;
     }
     return this.found ?? undefined;
   }
 
-  status(): ExecutorStatus {
-    const models = this.models ?? codexModels();
+  status(catalogModels?: ModelOption[]): ExecutorStatus {
+    const models = catalogModels ?? this.models ?? codexModels();
     if (!this.command()) return { available: false, models, note: 'codex.exe не найден (Codex Desktop или Codex CLI)' };
     return { available: true, models };
   }
 
-  prepare(task: Task, onAgent: (agentId: string) => void, resume?: string): PreparedRun {
+  prepare(task: Task, onAgent: (agentId: string) => void, resume?: string, captureLimit = 200_000): PreparedRun {
     const sandbox = task.access === 'write' ? 'workspace-write' : 'read-only';
     // `exec resume` has no --sandbox or -C: the sandbox goes through config, the folder is the process cwd.
     const args = resume
@@ -53,7 +59,7 @@ export class CodexExecutor implements Executor {
     args.push('-c', 'approval_policy="never"', '-m', task.model, '--skip-git-repo-check');
     if (task.effort) args.push('-c', `model_reasoning_effort="${task.effort}"`);
     args.push('-');
-    return { args, agentId: resume ? `codex:${resume}` : undefined, output: jsonEvents(onAgent) };
+    return { args, agentId: resume ? `codex:${resume}` : undefined, output: jsonEvents(onAgent, captureLimit) };
   }
 
   sessionOf(agentId: string): string | undefined {
@@ -86,7 +92,7 @@ export class CodexExecutor implements Executor {
  * messages carry the answer. A message can be an intermediate one, so the answer is
  * the last message before turn.completed (or the last one seen at all).
  */
-function jsonEvents(onAgent: (agentId: string) => void): OutputParser {
+function jsonEvents(onAgent: (agentId: string) => void, captureLimit: number): OutputParser {
   let pending = '';
   let agent: string | undefined;
   let last: string | undefined;
@@ -94,30 +100,32 @@ function jsonEvents(onAgent: (agentId: string) => void): OutputParser {
   let error: string | undefined;
 
   const line = (text: string) => {
-    let ev: Rec;
+    let ev: Record<string, unknown> | undefined;
     try {
-      ev = JSON.parse(text);
+      ev = record(JSON.parse(stripAnsi(text)));
     } catch {
       return;
     }
-    const thread = ev.thread_id ?? ev.session_id ?? ev.msg?.session_id;
-    if (!agent && typeof thread === 'string' && /^(thread|session)\.(started|configured)$|^session_configured$/.test(ev.type ?? ev.msg?.type ?? '')) {
+    if (!ev) return;
+    const msg = record(ev.msg);
+    const thread = ev.thread_id ?? ev.session_id ?? msg?.session_id;
+    if (!agent && typeof thread === 'string' && /^(thread|session)\.(started|configured)$|^session_configured$/.test(String(ev.type ?? msg?.type ?? ''))) {
       agent = `codex:${thread}`;
       onAgent(agent);
     }
-    const item = ev.item ?? {};
-    if (ev.type === 'item.completed' && (item.type === 'agent_message' || item.item_type === 'assistant_message') && typeof item.text === 'string') {
-      last = item.text.trim();
+    const item = record(ev.item);
+    if ((ev.type === 'item.completed' || ev.type === 'item.updated') && (item?.type === 'agent_message' || item?.item_type === 'assistant_message') && typeof item.text === 'string') {
+      last = stripAnsi(item.text).trim().slice(-captureLimit);
     } else if (ev.type === 'turn.completed') {
       final = last;
     } else if (ev.type === 'turn.failed' || ev.type === 'error') {
-      const message = ev.error?.message ?? ev.message;
+      const message = record(ev.error)?.message ?? ev.message;
       error = typeof message === 'string' ? message : 'Codex завершил ход с ошибкой';
     }
   };
   const feed = (chunk: string) => {
     const lines = (pending + chunk).split('\n');
-    pending = lines.pop() ?? '';
+    pending = (lines.pop() ?? '').slice(-Math.max(8_000_000, captureLimit * 6));
     lines.forEach(line);
   };
 
@@ -127,44 +135,11 @@ function jsonEvents(onAgent: (agentId: string) => void): OutputParser {
     finish(code, stdout, stderr) {
       feed('\n'); // the last line may lack a newline
       if (code === 0 && !error) return { ok: true, text: final ?? last };
-      if (error) return { ok: false, text: error };
+      const recognized = cliFailure('codex', error, stderr, stdout);
+      if (recognized) return recognized;
+      if (error) return { ok: false, text: stripAnsi(error) };
       // stdout is the JSON event stream; the reason for a crash is on stderr.
-      return { ok: false, text: (stderr.trim() || last || stdout.trim()).slice(-2_000) || `Код выхода ${code}` };
+      return { ok: false, text: (stripAnsi(stderr).trim() || last || stripAnsi(stdout).trim()).slice(-2_000) || `Код выхода ${code}` };
     },
   };
-}
-
-function codexBin(): Command | undefined {
-  if (process.env.LAND_CODEX_BIN) {
-    const cmd = cliCommand(process.env.LAND_CODEX_BIN, 'codex', '@openai/codex');
-    if (cmd) return cmd;
-  }
-  if (process.platform === 'win32') {
-    try {
-      const loc = execFileSync('powershell.exe', ['-NoProfile', '-Command', "(Get-AppxPackage -Name 'OpenAI.Codex*' | Select-Object -First 1).InstallLocation"], { encoding: 'utf8', windowsHide: true, timeout: 10_000 }).trim();
-      const exe = loc && join(loc, 'app', 'resources', 'codex.exe');
-      if (exe && existsSync(exe)) return { command: exe, args: [] };
-    } catch {
-      // no Store package
-    }
-  }
-  return cliOnPath('codex', '@openai/codex');
-}
-
-/** Models listed in Codex's local model cache; a cache, not a guarantee of access. */
-function codexModels(): ModelOption[] {
-  try {
-    const home = process.env.CODEX_HOME ?? join(homedir(), '.codex');
-    const cache = JSON.parse(readFileSync(join(home, 'models_cache.json'), 'utf8'));
-    return (cache.models as Rec[])
-      .filter((m) => m.visibility !== 'hide' && typeof m.slug === 'string')
-      .map((m) => ({
-        id: m.slug,
-        label: m.display_name ?? m.slug,
-        efforts: Array.isArray(m.supported_reasoning_levels) ? m.supported_reasoning_levels.map((r: Rec) => r.effort ?? r).filter((e: unknown) => typeof e === 'string') : undefined,
-        defaultEffort: typeof m.default_reasoning_level === 'string' ? m.default_reasoning_level : undefined,
-      }));
-  } catch {
-    return [];
-  }
 }
