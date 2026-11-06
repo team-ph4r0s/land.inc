@@ -1,3 +1,8 @@
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { findCli, verifyExecutableRunnable } from './executors/files.ts';
+import { AntigravityExecutor } from './executors/antigravity.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { NewTask, Task } from '@land/protocol';
@@ -281,4 +286,29 @@ test('an agent already in the office moves its task tag to the reply', { timeout
   await settled(board, reply.id);
   store.update(first.agentId!, { source: 'claude', detail: 'новая запись транскрипта' });
   assert.equal(tag(), reply.id); // and it stays on the newest task
+});
+
+test('CLI discovery bypasses WindowsApps and skips an EPERM probe, then executes a Unicode npm entry with Node', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'land-cli-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const blocked = join(root, 'Program Files', 'WindowsApps', 'fake.exe');
+  mkdirSync(join(root, 'Program Files', 'WindowsApps'), { recursive: true });
+  writeFileSync(blocked, '');
+  const dir = join(root, 'Папка с пробелами');
+  mkdirSync(dir);
+  const rejected = join(dir, 'denied.mjs');
+  const entry = join(dir, 'агент.mjs');
+  writeFileSync(rejected, '');
+  writeFileSync(entry, 'if (process.argv[2] === "--version") console.log("agy 1.5.1");');
+  const visited: string[] = [];
+  const command = findCli('fake-land-cli', 'unused', [blocked, rejected, entry], (cmd) => {
+    visited.push(cmd.args[0] ?? cmd.command);
+    if (cmd.args[0] === rejected) return verifyExecutableRunnable(cmd, () =>
+      ({ pid: 0, output: [], stdout: '', stderr: '', status: null, signal: null, error: Object.assign(new Error('denied'), { code: 'EPERM' }) }));
+    return verifyExecutableRunnable(cmd);
+  });
+  assert.deepEqual(visited, [rejected, entry]);
+  assert.deepEqual(command, { command: process.execPath, args: [entry] });
+  assert.deepEqual(verifyExecutableRunnable(command!), { ok: true, version: '1.5.1' });
+  assert.deepEqual(new AntigravityExecutor({ pathOverride: () => entry }).command(), command);
 });

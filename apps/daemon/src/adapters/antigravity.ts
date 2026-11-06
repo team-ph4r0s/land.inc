@@ -4,6 +4,7 @@ import { basename, dirname, join, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import type { Store } from '../store.ts';
+import { stripAnsi } from '../ansi.ts';
 import { JsonlTail } from '../tail.ts';
 import { clip, commandOutcome, describeTool, testOutcome } from '../activity.ts';
 
@@ -25,6 +26,8 @@ function projectName(path: string): string {
 function decodeArgs(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   return Object.fromEntries(Object.entries(value).map(([key, v]) => {
+    if (typeof v !== 'string') return [key, v];
+    v = stripAnsi(v);
     if (typeof v !== 'string' || !v.startsWith('"')) return [key, v];
     try { const decoded = JSON.parse(v); return [key, typeof decoded === 'string' ? decoded : v]; } catch { return [key, v]; }
   }));
@@ -89,9 +92,10 @@ export class AntigravityAdapter {
   }
   private apply(id: string, value: unknown, metadata: Metadata): void {
     if (!value || typeof value !== 'object') return;
-    const r = value as Record<string, unknown>;
-    const type = typeof r.type === 'string' ? r.type : '';
-    if (!['USER_INPUT', 'PLANNER_RESPONSE', 'GENERIC'].includes(type)) return;
+    const r = { ...value } as Record<string, unknown>;
+    if (typeof r.content === 'string') r.content = stripAnsi(r.content);
+    const type = r.type;
+    if (typeof type !== 'string' || !['USER_INPUT', 'PLANNER_RESPONSE', 'GENERIC'].includes(type)) return;
     const at = typeof r.created_at === 'string' ? Date.parse(r.created_at) : NaN;
     if (!Number.isFinite(at)) return;
     const contextCwd = type === 'USER_INPUT' && typeof r.content === 'string' ? r.content.match(/^Command Working Directory:\s*(.+)$/im)?.[1]?.trim() : undefined;

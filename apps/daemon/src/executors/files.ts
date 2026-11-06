@@ -1,6 +1,7 @@
-import { execFileSync, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from 'node:child_process';
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { Command } from './types.ts';
 
 /** Small file helpers the executors share for finding their CLI and history. */
@@ -44,67 +45,89 @@ export function headCwd(path: string): string | undefined {
 }
 
 export function onPath(name: string): string | undefined {
-  return paths(name)[0];
-}
-
-/** Probe a candidate before it is cached as an available CLI. Never uses a shell. */
-export function verifyExecutableRunnable(candidateCommand: Command, args: string[] = ['--version']): boolean {
-  try {
-    const result = spawnSync(candidateCommand.command, [...candidateCommand.args, ...args], {
-      encoding: 'utf8', windowsHide: true, shell: false, timeout: 3_500, maxBuffer: 128 * 1024,
-    });
-    return !result.error && result.status === 0;
-  } catch {
-    return false;
-  }
+  return paths(name).find((path) => !blockedWindowsApps(path));
 }
 
 function paths(name: string): string[] {
-  if (process.platform === 'win32') {
-    const extensions = (process.env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';');
-    const found: string[] = [];
-    for (const dir of (process.env.PATH ?? '').split(';').filter(Boolean)) {
-      for (const extension of extensions) {
-        const candidate = join(dir, /\.[^.]+$/.test(name) ? name : `${name}${extension}`);
-        if (existsSync(candidate)) found.push(candidate);
-      }
-    }
-    return [...new Set(found)];
-  }
-  try {
-    const out = execFileSync('which', [name], { encoding: 'utf8', windowsHide: true, timeout: 5_000 });
-    return out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  } catch {
-    return [];
-  }
+  const extensions = process.platform === 'win32' ? ['.exe', '.com', '.cmd', '.bat', ''] : [''];
+  return (process.env.PATH ?? '').split(delimiter).map((dir) => dir.replace(/^"|"$/g, ''))
+    .filter(isAbsolute).flatMap((dir) => extensions.map((extension) => join(dir, name + extension)).filter(existsSync));
 }
 
-/** npm installs Unix, cmd and PowerShell shims together. Run the package's JS
- * entry with Node on Windows, keeping arguments out of a command shell. */
-export function cliCommand(bin: string, name: string, packageName: string): Command | undefined {
-  if (!existsSync(bin)) return undefined;
-  if (process.platform === 'win32' && /[\\/]Program Files[\\/]WindowsApps(?:[\\/]|$)/i.test(bin)) return undefined;
-  if (process.platform !== 'win32' || /\.(exe|com)$/i.test(bin)) return { command: bin, args: [] };
+export function blockedWindowsApps(path: string): boolean {
+  return /(?:^|[\\/])WindowsApps(?:[\\/]|$)/i.test(path);
+}
+
+type VersionProbe = (command: string, args: string[], options: SpawnSyncOptionsWithStringEncoding) => SpawnSyncReturns<string>;
+
+export function verifyExecutableRunnable(cmd: Command, probe: VersionProbe = spawnSync): { ok: boolean; version?: string } {
+  if (blockedWindowsApps(cmd.command) || cmd.args.some(blockedWindowsApps)) return { ok: false };
+  const result = probe(cmd.command, [...cmd.args, '--version'], {
+    encoding: 'utf8', shell: false, windowsHide: true, timeout: 2000, maxBuffer: 128 * 1024,
+  });
+  if (result.error || result.status !== 0) return { ok: false };
+  const output = result.stdout;
+  return { ok: true, version: output?.match(/\b\d+\.\d+\.\d+(?:[-+][\w.-]+)?/)?.[0] };
+}
+
+function realFile(path: string): string | undefined {
   try {
-    const root = join(dirname(bin), 'node_modules', packageName);
-    const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
-    const entry = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin?.[name];
-    if (typeof entry !== 'string') return undefined;
-    const script = resolve(root, entry);
-    if (!existsSync(script) || !/\.(m?js|cjs)$/i.test(script)) return undefined;
-    const node = join(dirname(bin), 'node.exe');
-    return { command: existsSync(node) ? node : process.execPath, args: [script] };
-  } catch {
-    return undefined;
+    if (blockedWindowsApps(path) || !statSync(path).isFile()) return undefined;
+    const real = realpathSync.native(path);
+    return blockedWindowsApps(real) ? undefined : real;
+  } catch { return undefined; }
+}
+
+/** npm shims are never interpreted by a shell. Only their package's declared bin is run. */
+export function cliCommand(bin: string, name: string, packageName: string | readonly string[]): Command | undefined {
+  if (!isAbsolute(bin) || !realFile(bin)) return undefined;
+  if (/\.(?:[cm]?js)$/i.test(bin)) return { command: process.execPath, args: [bin] };
+  if (process.platform === 'win32' && /\.(exe|com)$/i.test(bin)) return { command: bin, args: [] };
+  const candidates = typeof packageName === 'string' ? [packageName] : packageName;
+  for (const pkgName of candidates) {
+    try {
+      const root = join(dirname(bin), 'node_modules', pkgName);
+      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { bin?: string | Record<string, unknown> };
+      const entry = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin?.[name];
+      if (typeof entry !== 'string') continue;
+      const script = resolve(root, entry);
+      if (relative(root, script).split(/[\\/]/)[0] === '..' || !realFile(script) || !/\.[cm]?js$/i.test(script)) continue;
+      return { command: process.execPath, args: [script] };
+    } catch { /* Try the next package. */ }
   }
+  return process.platform === 'win32' ? undefined : { command: bin, args: [] };
+}
+
+/**
+ * npm's global folders: an office started from a shortcut may not have them on PATH,
+ * yet that is where `npm i -g` puts claude, codex and agy.
+ */
+export function npmGlobalBins(name: string): string[] {
+  const dirs = process.platform === 'win32'
+    ? [process.env.APPDATA && join(process.env.APPDATA, 'npm'), process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'npm'), join(homedir(), 'AppData', 'Roaming', 'npm')]
+    : [join(homedir(), '.npm-global', 'bin'), join(homedir(), '.local', 'bin')];
+  const extensions = process.platform === 'win32' ? ['.exe', '.cmd', '.bat', ''] : [''];
+  return [...new Set(dirs.filter((dir): dir is string => !!dir))].flatMap((dir) => extensions.map((extension) => join(dir, name + extension))).filter(existsSync);
+}
+
+export function findCli(name: string, packageName: string | readonly string[], candidates: string[] = [], probe = verifyExecutableRunnable): Command | undefined {
+  for (const bin of new Set([...candidates, ...paths(name), ...npmGlobalBins(name)])) {
+    const cmd = cliCommand(bin, name, packageName);
+    if (cmd && probe(cmd).ok) return cmd;
+  }
+  return undefined;
 }
 
 export function cliOnPath(name: string, packageName: string): Command | undefined {
-  for (const bin of paths(name)) {
-    const cmd = cliCommand(bin, name, packageName);
-    if (cmd) return cmd;
-  }
-  return undefined;
+  return findCli(name, packageName);
+}
+
+export function findAgy(pathOverride?: string): Command | undefined {
+  const installed = process.platform === 'win32'
+    ? join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), 'agy', 'bin', 'agy.exe')
+    : join(homedir(), '.local', 'bin', 'agy');
+  const candidates = [pathOverride, process.env.LAND_AGY_BIN, installed].filter((value): value is string => !!value);
+  return findCli('agy', ['agy', '@google/agy', '@google/antigravity'], candidates);
 }
 
 export function compareVersions(a: string, b: string): number {

@@ -57,7 +57,10 @@ export class AgentSprite {
   private bubble = new Container();
   private bubbleBg = new Graphics();
   private bubbleText: Text;
+  private progressBar = new Graphics();
   private bubbleUntil = 0;
+  private teamStage?: string;
+  private teamProgress = 0;
   private t = Math.random() * 10;
   private skin: number;
   private hair: number;
@@ -80,7 +83,7 @@ export class AgentSprite {
       style: { fontFamily: 'Inter, system-ui, sans-serif', fontSize: 11, fill: 0x1f2430, wordWrap: true, wordWrapWidth: 170 },
     });
     this.bubbleText.anchor.set(0.5, 1);
-    this.bubble.addChild(this.bubbleBg, this.bubbleText);
+    this.bubble.addChild(this.bubbleBg, this.bubbleText, this.progressBar);
     this.view.addChild(this.ring, this.body, this.namePlate, this.name, this.modelText, this.bubble);
     this.view.eventMode = 'static';
     this.view.cursor = 'pointer';
@@ -150,13 +153,25 @@ export class AgentSprite {
 
   say(text: string, ms = 6000): void {
     this.bubbleText.text = text;
+    const hasBar = !!this.teamStage;
     const w = Math.min(190, this.bubbleText.width + 16);
-    const hgt = this.bubbleText.height + 10;
+    const hgt = this.bubbleText.height + (hasBar ? 18 : 10);
     this.bubbleBg.clear();
     this.bubbleBg.roundRect(-w / 2, -hgt - 4, w, hgt, 8).fill({ color: 0xffffff, alpha: 0.96 });
     this.bubbleBg.poly([-5, -4, 5, -4, 0, 3]).fill({ color: 0xffffff, alpha: 0.96 });
-    this.bubbleText.position.set(0, -9);
+    this.bubbleText.position.set(0, hasBar ? -15 : -9);
     this.bubbleUntil = performance.now() + ms;
+  }
+
+  setTeamStage(stageText?: string, progress?: number): void {
+    this.teamStage = stageText;
+    this.teamProgress = progress ?? 0.5;
+    if (stageText) {
+      this.say(stageText, 1_000_000);
+    } else {
+      this.bubbleUntil = 0;
+      this.progressBar.clear();
+    }
   }
 
   walkTo(tile: Tile): void {
@@ -210,8 +225,20 @@ export class AgentSprite {
     this.view.zIndex = depth(this.pos.x, this.pos.y) + 2;
     this.draw();
 
-    const bubbleOn = performance.now() < this.bubbleUntil || this.state.activity === 'wait' || this.selected;
+    const bubbleOn = performance.now() < this.bubbleUntil || this.state.activity === 'wait' || this.selected || !!this.teamStage;
     this.bubble.visible = bubbleOn;
+
+    if (this.teamStage && bubbleOn) {
+      const w = Math.min(190, this.bubbleText.width + 16);
+      const barW = w - 16;
+      const progress = this.teamProgress > 0 ? this.teamProgress : (Math.sin(this.t * 3) + 1) / 2;
+      this.progressBar.clear();
+      this.progressBar.roundRect(-barW / 2, -10, barW, 4, 2).fill(0xdcded4);
+      this.progressBar.roundRect(-barW / 2, -10, barW * Math.min(1, Math.max(0.05, progress)), 4, 2).fill(0x10a37f);
+    } else {
+      this.progressBar.clear();
+    }
+
     const top = this.top - 4;
     const modelH = this.modelText.text ? this.modelText.height : 0;
     this.modelText.position.set(0, top);

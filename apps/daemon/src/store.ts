@@ -1,3 +1,4 @@
+import { maskSecrets } from './mcp.ts';
 import { EventEmitter } from 'node:events';
 import type { Activity, AgentState, LogEntry, ServerMessage } from '@land/protocol';
 
@@ -89,7 +90,10 @@ export class Store extends EventEmitter<{ message: [ServerMessage] }> {
       }
       this.agents.set(id, a);
     }
-    Object.assign(a.state, patch);
+    Object.assign(a.state, patch, {
+      ...(typeof patch.title === 'string' ? { title: maskSecrets(patch.title) } : {}),
+      ...(typeof patch.detail === 'string' ? { detail: maskSecrets(patch.detail) } : {}),
+    });
     a.state.updatedAt = Math.max(a.state.updatedAt, at);
     this.publish(a);
   }
@@ -164,7 +168,8 @@ export class Store extends EventEmitter<{ message: [ServerMessage] }> {
 
   log(id: string, entry: LogEntry): void {
     const a = this.agents.get(id);
-    if (!a || !entry.text) return;
+    if (!a || typeof entry.text !== 'string' || !entry.text) return;
+    entry = { ...entry, text: maskSecrets(entry.text) };
     const limit = entry.kind === 'user' || entry.kind === 'assistant' ? 200_000 : 4_000;
     entry = { ...entry, text: entry.text.length > limit ? entry.text.slice(0, limit) + '\n[Достигнут лимит сообщения]' : entry.text };
     a.log.push(entry);
@@ -184,7 +189,7 @@ export class Store extends EventEmitter<{ message: [ServerMessage] }> {
 
   private setActivity(a: Internal, activity: Activity, detail: string, at: number): void {
     a.state.activity = activity;
-    a.state.detail = detail;
+    a.state.detail = maskSecrets(detail);
     this.touch(a, at);
   }
 

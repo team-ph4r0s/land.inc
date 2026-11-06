@@ -1,5 +1,8 @@
-import type { Access, BoardConfig, ClientMessage, Executor, McpStatus, ModelOption, Task } from '@land/protocol';
-import { conversations, isLive, messageHtml } from './conversations';
+import type { Access, AgentProfile, BoardConfig, ClientMessage, Executor, Task } from '@land/protocol';
+import { conversations, exportConversationToMarkdown, isLive, messageHtml } from './conversations';
+import { modelSelect, showModal, showToast, type ModelSelectController } from './ui-kit';
+import { renderContextBudgetGauge } from './mcp-menu';
+import { store } from './store';
 
 const STATUS: Record<Task['status'], string> = {
   starting: 'запускается',
@@ -9,26 +12,41 @@ const STATUS: Record<Task['status'], string> = {
   failed: 'ошибка',
   cancelled: 'отменена',
 };
+
 const EXECUTOR: Record<Executor, string> = { claude: 'Claude', codex: 'Codex', antigravity: 'Antigravity' };
 const EXECUTORS = Object.keys(EXECUTOR) as Executor[];
+
 const SETUP: Record<Executor, { url: string; install: string; login: string }> = {
-  claude: { url: 'https://code.claude.com/docs/en/setup', install: 'Windows PowerShell: irm https://claude.ai/install.ps1 | iex\nmacOS / Linux: curl -fsSL https://claude.ai/install.sh | bash', login: 'claude auth login' },
-  codex: { url: 'https://developers.openai.com/codex/cli', install: 'npm install -g @openai/codex', login: 'codex login' },
-  antigravity: { url: 'https://antigravity.google/docs/getting-started?tab=cli', install: 'Windows PowerShell: irm https://antigravity.google/cli/install.ps1 | iex\nmacOS / Linux: curl -fsSL https://antigravity.google/cli/install.sh | bash', login: 'agy' },
+  claude: {
+    url: 'https://code.claude.com/docs/en/setup',
+    install: 'Windows PowerShell: irm https://claude.ai/install.ps1 | iex\nmacOS / Linux: curl -fsSL https://claude.ai/install.sh | bash',
+    login: 'claude auth login',
+  },
+  codex: {
+    url: 'https://developers.openai.com/codex/cli',
+    install: 'npm install -g @openai/codex',
+    login: 'codex login',
+  },
+  antigravity: {
+    url: 'https://antigravity.google/docs/getting-started?tab=cli',
+    install:
+      'Windows PowerShell: irm https://antigravity.google/cli/install.ps1 | iex\nmacOS / Linux: curl -fsSL https://antigravity.google/cli/install.sh | bash',
+    login: 'agy',
+  },
 };
-// Claude has no file system sandbox here: only its permission mode, plus your own allow rules from Claude's settings.
+
 const ACCESS_HINT: Record<Executor, Record<Access, string>> = {
   claude: {
-    read: 'Режим plan: правки и команды этим режимом не разрешаются. Ваши правила allow из настроек Claude продолжают действовать. Песочницы файловой системы нет.',
-    write: 'Режим acceptEdits: правки файлов принимаются без вопроса. Команды и всё, что требует подтверждения, отклоняются, если их не разрешают ваши правила allow. Песочницы файловой системы нет.',
+    read: 'Режим plan: правки и команды этим режимом не разрешаются. Песочницы файловой системы нет.',
+    write: 'Режим acceptEdits: правки файлов принимаются без вопроса. Песочницы файловой системы нет.',
   },
   codex: {
     read: 'Песочница read-only: читает и отвечает, ничего не меняет.',
-    write: 'Песочница workspace-write: правит файлы только в папке проекта. Разрешения не запрашиваются, всё за пределами песочницы отклоняется.',
+    write: 'Песочница workspace-write: правит файлы только в папке проекта.',
   },
   antigravity: {
-    read: 'Режим plan: настройки и разрешения Antigravity продолжают действовать; отдельная песочница файлов не гарантируется.',
-    write: 'Режим accept-edits: правки могут выполняться без подтверждения; остальные действия зависят от настроек Antigravity.',
+    read: 'Режим plan: настройки и разрешения Antigravity продолжают действовать.',
+    write: 'Режим accept-edits: правки могут выполняться без подтверждения.',
   },
 };
 
@@ -37,9 +55,9 @@ const base = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p;
 const OTHER = '__other__';
 
 /**
- * The task board panel: a form that sends a task to Claude or Codex in a chosen
- * project folder, and the list of tasks with their status. The form is built
- * once so typing is never interrupted by live updates; only the list re-renders.
+ * Task 1 & 7 & 8: TaskBoardPanel
+ * Supports modelSelect() catalog helper, pinned conversations with rename/export,
+ * per-conversation drafts, scroll positions, and reactive updates without DOM reset.
  */
 export class TaskBoardPanel {
   private el: HTMLElement;
@@ -64,11 +82,10 @@ export class TaskBoardPanel {
   private scrolls = new Map<string, number>();
   private messagesKey = '';
   private composerKey = '';
-  private mcpStatuses: McpStatus[] = [];
-  /**
-   * The reply form under a finished task. The list re-renders on every update, so what
-   * the user typed lives here and is put back each time.
-   */
+
+  private modelCtrl!: ModelSelectController;
+  private openDetails = new Set<string>();
+
   private reply?: { taskId: string; draft: string; access: Access; error?: string; pending?: string };
 
   constructor(el: HTMLElement, send: (m: ClientMessage) => boolean, onShowAgent: (id: string) => void) {
@@ -76,15 +93,26 @@ export class TaskBoardPanel {
     this.send = send;
     this.onShowAgent = onShowAgent;
     this.build();
+
+    store.on('conversations', () => this.renderList());
   }
 
-  /** Agents currently in the office, so a task can offer "show in the office". */
   openForAgent(id: string): void {
-    this.selected = conversations(this.tasks).find((c) => c.turns.some((t) => t.agentId === id))?.id;
+    this.selected = conversations(this.tasks, store.conversationsMeta).find((c) => c.turns.some((t) => t.agentId === id))?.id;
     this.reply = undefined;
     this.composing = false;
     this.browsing = false;
     this.renderList();
+  }
+
+  openForAgentProfile(agent: AgentProfile): void {
+    this.composing = true;
+    this.browsing = false;
+    this.setSeg('executor', agent.executor);
+    this.setSeg('access', agent.access);
+    this.modelCtrl.setValue(agent.executor, agent.model, agent.effort);
+    this.renderList();
+    this.field<HTMLTextAreaElement>('prompt').focus();
   }
 
   setAgents(ids: Set<string>): void {
@@ -102,30 +130,64 @@ export class TaskBoardPanel {
     this.renderList();
   }
 
-  setMcpStatuses(statuses: McpStatus[]): void {
-    this.mcpStatuses = statuses.map((status) => ({ ...status }));
-    this.renderMcpBanner();
-  }
-
   upsert(task: Task): void {
     const i = this.tasks.findIndex((t) => t.id === task.id);
     if (i >= 0) this.tasks[i] = task;
     else this.tasks.unshift(task);
+
     if (this.pending && task.prompt === this.pending.prompt) {
-      this.selected = conversations(this.tasks).find((c) => c.turns.some((t) => t.id === task.id))?.id;
+      this.selected = conversations(this.tasks, store.conversationsMeta).find((c) => c.turns.some((t) => t.id === task.id))?.id;
       this.composing = false;
       this.browsing = false;
     }
     this.renderList();
   }
 
+  /** Live CLI output of running tasks (raw, often JSON events): shown apart from the answer, dropped when the task ends. */
+  private live = new Map<string, string>();
+
   streamChunk(taskId: string, chunk: string): void {
-    const index = this.tasks.findIndex((task) => task.id === taskId);
-    if (index < 0) return;
-    const task = this.tasks[index];
-    const result = `${task.result ?? ''}${chunk}`.slice(-200_000);
-    this.tasks = this.tasks.map((item, itemIndex) => itemIndex === index ? { ...item, result } : item);
+    const task = this.tasks.find((item) => item.id === taskId);
+    if (!task || !isLive(task)) return;
+    this.live.set(taskId, `${this.live.get(taskId) ?? ''}${chunk}`.slice(-20_000));
     this.renderList();
+  }
+
+  private liveOutput(t: Task): string {
+    if (!isLive(t)) {
+      this.live.delete(t.id);
+      return '';
+    }
+    const text = this.live.get(t.id);
+    if (!text) return '';
+    const key = `live:${t.id}`;
+    return `<details class="live-output" data-key="${esc(key)}" ${this.openDetails.has(key) ? 'open' : ''}><summary>Вывод CLI</summary><pre class="task-result">${esc(text.slice(-4_000))}</pre></details>`;
+  }
+
+  private promptSaveArtifact(taskId: string): void {
+    const task = this.tasks.find((t) => t.id === taskId);
+    if (!task) return;
+    const content = document.createElement('div');
+    content.innerHTML = `<label class="constructor-field"><span>Путь внутри проекта «${esc(base(task.cwd))}»</span><input type="text" data-artifact-path maxlength="400" value="artifacts/result.md" /></label><p class="note">Файл будет перезаписан, если уже существует. Путь за пределы папки проекта не допускается.</p>`;
+    showModal({
+      title: 'Сохранить ответ в проект',
+      content,
+      actions: [
+        { label: 'Отмена', onClick: (m) => m.close() },
+        { label: 'Сохранить', kind: 'primary', onClick: (m) => {
+          const path = content.querySelector<HTMLInputElement>('[data-artifact-path]')!.value.trim();
+          if (!path) return showToast('Укажите путь', 'warn');
+          const requestId = crypto.randomUUID();
+          const answer = store.expectAck(requestId);
+          this.send({ type: 'artifact.save', taskId, path, format: path.endsWith('.txt') ? 'txt' : 'md', requestId });
+          void answer.then((result) => {
+            if (!result.ok) return showToast(result.message ?? 'Не удалось сохранить', 'bad', 6000);
+            showToast(result.message ?? 'Сохранено', 'ok');
+            m.close();
+          });
+        } },
+      ],
+    });
   }
 
   showError(message: string): void {
@@ -139,7 +201,6 @@ export class TaskBoardPanel {
   submissionResult(id: string, error?: string): void {
     const saved = [...this.drafts].find(([, r]) => r.pending === id);
     if (this.reply?.pending === id || saved) {
-      // Accepted: the reply is a new task at the top of the list. Refused: keep the text and say why.
       if (saved) {
         if (error) this.drafts.set(saved[0], { ...saved[1], pending: undefined, error });
         else this.drafts.delete(saved[0]);
@@ -154,8 +215,10 @@ export class TaskBoardPanel {
     this.updateTeam();
     if (error) this.showError(error);
     else {
-      // Team prompts include coordinator context and need not equal the form text.
-      if (this.composing) { this.composing = false; this.browsing = true; }
+      if (this.composing) {
+        this.composing = false;
+        this.browsing = true;
+      }
       this.renderList();
     }
   }
@@ -165,7 +228,10 @@ export class TaskBoardPanel {
     if (this.reply?.pending) this.submissionResult(this.reply.pending, lost);
     for (const r of [...this.drafts.values()]) if (r.pending) this.submissionResult(r.pending, lost);
     if (this.pending) this.submissionResult(this.pending.id, lost);
-    if (this.folderRequest) { this.folderRequest = undefined; this.folderMessage('Нет связи с демоном'); }
+    if (this.folderRequest) {
+      this.folderRequest = undefined;
+      this.folderMessage('Нет связи с демоном');
+    }
     const refresh = this.form.querySelector<HTMLButtonElement>('[data-refresh]')!;
     refresh.disabled = false;
     refresh.textContent = 'Проверить доступность';
@@ -181,7 +247,9 @@ export class TaskBoardPanel {
     this.form.querySelector<HTMLButtonElement>('[data-folder-up]')!.disabled = !result.parent;
     this.form.querySelector<HTMLButtonElement>('[data-folder-select]')!.disabled = false;
     const list = this.form.querySelector<HTMLElement>('[data-folder-list]')!;
-    list.innerHTML = result.folders?.length ? result.folders.map((path) => `<button type="button" data-folder="${esc(path)}">📁 ${esc(base(path))}</button>`).join('') : '<p class="note">Нет вложенных папок</p>';
+    list.innerHTML = result.folders?.length
+      ? result.folders.map((path) => `<button type="button" data-folder="${esc(path)}">📁 ${esc(base(path))}</button>`).join('')
+      : '<p class="note">Нет вложенных папок</p>';
   }
 
   private folderMessage(message: string): void {
@@ -205,7 +273,6 @@ export class TaskBoardPanel {
 
   private build(): void {
     this.el.innerHTML = `
-      <div class="mcp-banner" data-mcp-banner hidden></div>
       <form class="task-form">
         <label>Проект
           <select name="project"></select>
@@ -232,10 +299,9 @@ export class TaskBoardPanel {
           <p class="note">После установки или входа нажмите «Проверить доступность». Если менялся PATH, перезапустите офис из нового терминала.</p>
           <button type="button" data-refresh>Проверить доступность</button>
         </details>
-        <div class="row">
-          <label>Модель <select name="model"></select></label>
-          <label>Рассуждения <select name="effort"></select></label>
-        </div>
+        
+        <div class="constructor-field" id="board-model-mount"></div>
+
         <div class="field">Доступ
           <div class="seg" data-name="access">
             <button type="button" data-value="read">Только чтение</button>
@@ -252,18 +318,18 @@ export class TaskBoardPanel {
           <p class="note">Основной исполнитель выбран выше. Включите нужные этапы и агентов. Устанавливать все CLI не требуется.</p>
           <label class="team-choice"><input type="checkbox" name="usePlanner" /> Планирование</label>
           <div class="row" data-planner-options hidden>
-          <label>Планировщик <select name="plannerExecutor">${EXECUTORS.map((ex) => `<option value="${ex}">${EXECUTOR[ex]}</option>`).join('')}</select></label>
-          <label>Модель <select name="plannerModel"></select></label>
-          <label>Рассуждения <select name="plannerEffort"></select></label>
+            <label>Планировщик <select name="plannerExecutor">${EXECUTORS.map((ex) => `<option value="${ex}">${EXECUTOR[ex]}</option>`).join('')}</select></label>
+            <div id="planner-model-mount" class="flex-1"></div>
           </div>
           <p class="note">Проверяющие (по порядку). Можно выбрать того же провайдера, что и у исполнителя: это будет отдельная сессия.</p>
-          ${EXECUTORS.map((ex) => `<div class="team-member" data-reviewer="${ex}">
+          ${EXECUTORS.map(
+            (ex) => `<div class="team-member" data-reviewer="${ex}">
             <label class="team-choice"><input type="checkbox" name="review-${ex}" /> ${EXECUTOR[ex]} <span data-review-status></span></label>
             <div class="row" data-review-options hidden>
-              <label>Модель <select name="reviewModel-${ex}"></select></label>
-              <label>Рассуждения <select name="reviewEffort-${ex}"></select></label>
+              <div id="review-model-mount-${ex}" class="flex-1"></div>
             </div>
-          </div>`).join('')}
+          </div>`,
+          ).join('')}
           <p class="note" data-team-summary></p>
           <p class="note">Планирование и проверка работают только на чтение с ограничениями выбранного CLI. Каждый этап — отдельный запрос к модели с её лимитами.</p>
         </div>
@@ -272,27 +338,57 @@ export class TaskBoardPanel {
         <button type="submit" class="primary">Отправить задачу</button>
       </form>
       <div class="tasks"></div>`;
+
     this.form = this.el.querySelector('form')!;
     this.list = this.el.querySelector('.tasks')!;
     this.error = this.el.querySelector('.error')!;
-    this.el.querySelector<HTMLElement>('[data-mcp-banner]')!.addEventListener('click', (event) => {
-      const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-mcp-install]');
-      if (!button) return;
-      const selected = button.dataset.mcpInstall;
-      const missing = selected ? [selected as McpStatus['name']] : this.mcpStatuses.filter((status) => status.status !== 'installed').map((status) => status.name);
-      if (missing.length) this.send({ type: 'mcp.install', request: { servers: missing } });
+
+    this.form.insertAdjacentHTML(
+      'beforebegin',
+      '<div class="board-toolbar"><button type="button" data-browse>☰ Разговоры</button><button type="button" data-new>＋ Новая задача</button></div><input class="conversation-search" type="search" placeholder="Найти разговор…" aria-label="Поиск разговоров" />',
+    );
+
+    this.list.innerHTML =
+      '<div class="conversation-list" aria-label="Разговоры"></div><section class="conversation"><div class="conversation-head"></div><div class="messages" tabindex="0" aria-label="История разговора"></div><div class="composer"></div></section>';
+
+    // Mount unified modelSelect
+    const modelMount = this.form.querySelector<HTMLElement>('#board-model-mount')!;
+    this.modelCtrl = modelSelect({
+      container: modelMount,
+      send: this.send,
+      showUnified: true,
+      showEffort: true,
+      initialExecutor: 'codex',
+      initialModel: 'gpt-6.1-sol',
+      initialEffort: 'high',
+      onChange: (val) => {
+        this.setSeg('executor', val.executor);
+        this.updateNotes();
+      },
+      onExecutorChange: (ex) => {
+        this.setSeg('executor', ex);
+        this.updateNotes();
+      },
     });
-    this.form.insertAdjacentHTML('beforebegin', '<div class="board-toolbar"><button type="button" data-browse>☰ Разговоры</button><button type="button" data-new>＋ Новая задача</button></div><input class="conversation-search" type="search" placeholder="Найти разговор…" aria-label="Поиск разговоров" />');
-    this.list.innerHTML = '<div class="conversation-list" aria-label="Разговоры"></div><section class="conversation"><div class="conversation-head"></div><div class="messages" tabindex="0" aria-label="История разговора"></div><div class="composer"></div></section>';
-    this.renderMcpBanner();
+
     this.el.querySelector('[data-new]')!.addEventListener('click', () => {
       this.composing = !this.composing;
       this.renderList();
       if (this.composing) this.field<HTMLTextAreaElement>('prompt').focus();
     });
-    this.el.querySelector('[data-browse]')!.addEventListener('click', () => { this.browsing = !this.browsing; this.composing = false; this.renderList(); });
-    this.el.querySelector<HTMLInputElement>('.conversation-search')!.addEventListener('input', (e) => { this.search = (e.target as HTMLInputElement).value.toLocaleLowerCase(); this.renderList(); });
-    this.setSeg('executor', 'claude');
+
+    this.el.querySelector('[data-browse]')!.addEventListener('click', () => {
+      this.browsing = !this.browsing;
+      this.composing = false;
+      this.renderList();
+    });
+
+    this.el.querySelector<HTMLInputElement>('.conversation-search')!.addEventListener('input', (e) => {
+      this.search = (e.target as HTMLInputElement).value.toLocaleLowerCase();
+      this.renderList();
+    });
+
+    this.setSeg('executor', 'codex');
     this.setSeg('access', 'read');
 
     this.el.querySelectorAll<HTMLElement>('.seg').forEach((seg) =>
@@ -301,118 +397,200 @@ export class TaskBoardPanel {
         if (!b || b.disabled) return;
         this.setSeg(seg.dataset.name!, b.dataset.value!);
         if (seg.dataset.name === 'executor') {
-          this.field<HTMLSelectElement>('model').value = '';
-          this.field<HTMLSelectElement>('effort').value = '';
-          this.fillModels();
+          this.modelCtrl.setFilterExecutor(b.dataset.value as Executor);
         }
         this.updateNotes();
       }),
     );
+
     this.field<HTMLSelectElement>('project').addEventListener('change', () => {
       this.field<HTMLInputElement>('customPath').hidden = this.field<HTMLSelectElement>('project').value !== OTHER;
       this.updateNotes();
     });
+
     this.form.querySelector('[data-folder-open]')!.addEventListener('click', () => {
       this.form.querySelector<HTMLElement>('.folder-browser')!.hidden = false;
       const selected = this.field<HTMLSelectElement>('project').value;
       this.browse(selected === OTHER ? this.field<HTMLInputElement>('customPath').value.trim() || undefined : selected || undefined);
     });
-    this.form.querySelector('[data-folder-close]')!.addEventListener('click', () => { this.form.querySelector<HTMLElement>('.folder-browser')!.hidden = true; this.folderRequest = undefined; });
-    this.form.querySelector('[data-folder-up]')!.addEventListener('click', () => { if (this.folderParent) this.browse(this.folderParent); });
+
+    this.form.querySelector('[data-folder-close]')!.addEventListener('click', () => {
+      this.form.querySelector<HTMLElement>('.folder-browser')!.hidden = true;
+      this.folderRequest = undefined;
+    });
+
+    this.form.querySelector('[data-folder-up]')!.addEventListener('click', () => {
+      if (this.folderParent) this.browse(this.folderParent);
+    });
+
     this.form.querySelector('[data-folder-list]')!.addEventListener('click', (e) => {
       const button = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-folder]');
       if (button?.dataset.folder) this.browse(button.dataset.folder);
     });
+
     this.form.querySelector('[data-folder-select]')!.addEventListener('click', () => {
       if (!this.folderPath) return;
-      this.field<HTMLSelectElement>('project').value = OTHER;
-      const input = this.field<HTMLInputElement>('customPath');
-      input.value = this.folderPath;
-      input.hidden = false;
+      let project = this.field<HTMLSelectElement>('project');
+      let opt = [...project.options].find((o) => o.value === this.folderPath);
+      if (!opt) {
+        opt = new Option(`${base(this.folderPath)} — ${this.folderPath}`, this.folderPath);
+        project.insertBefore(opt, project.options[project.options.length - 1]);
+      }
+      project.value = this.folderPath;
+      this.field<HTMLInputElement>('customPath').hidden = true;
       this.form.querySelector<HTMLElement>('.folder-browser')!.hidden = true;
       this.updateNotes();
     });
-    this.field<HTMLSelectElement>('model').addEventListener('change', () => this.fillEfforts());
-    this.field<HTMLInputElement>('team').addEventListener('change', () => {
-      const team = this.field<HTMLInputElement>('team').checked;
-      this.form.querySelector<HTMLElement>('[data-team-options]')!.hidden = !team;
-      this.form.querySelector<HTMLElement>('[data-executor-label]')!.textContent = team ? 'Основной исполнитель' : 'Кому';
-      this.updateTeam();
-    });
-    this.field<HTMLInputElement>('usePlanner').addEventListener('change', () => this.updateTeam());
-    this.field<HTMLSelectElement>('plannerExecutor').addEventListener('change', () => {
-      this.field<HTMLSelectElement>('plannerModel').value = '';
-      this.field<HTMLSelectElement>('plannerEffort').value = '';
-      this.fillPlannerModels();
-    });
-    this.field<HTMLSelectElement>('plannerModel').addEventListener('change', () => this.fillPlannerEfforts());
-    for (const ex of EXECUTORS) {
-      this.field<HTMLInputElement>(`review-${ex}`).addEventListener('change', () => this.updateTeam());
-      this.field<HTMLSelectElement>(`reviewModel-${ex}`).addEventListener('change', () => this.fillReviewEfforts(ex));
-    }
-    this.form.querySelector<HTMLButtonElement>('[data-refresh]')!.addEventListener('click', () => {
-      if (!this.send({ type: 'board.refresh' })) return this.showError('Нет связи с демоном');
-      const button = this.form.querySelector<HTMLButtonElement>('[data-refresh]')!;
-      button.disabled = true;
-      button.textContent = 'Проверяем CLI…';
-    });
+
     this.form.addEventListener('submit', (e) => {
       e.preventDefault();
       this.submit();
     });
+
+    this.form.querySelector('[data-refresh]')!.addEventListener('click', () => {
+      const b = this.form.querySelector<HTMLButtonElement>('[data-refresh]')!;
+      b.disabled = true;
+      b.textContent = 'Проверяем…';
+      this.send({ type: 'board.refresh' });
+    });
+
+    this.field<HTMLInputElement>('team').addEventListener('change', () => {
+      this.form.querySelector<HTMLElement>('[data-team-options]')!.hidden = !this.field<HTMLInputElement>('team').checked;
+      this.updateTeam();
+    });
+
+    this.field<HTMLInputElement>('usePlanner').addEventListener('change', () => this.updateTeam());
+
+    for (const ex of EXECUTORS) {
+      this.field<HTMLInputElement>(`review-${ex}`).addEventListener('change', () => this.updateTeam());
+    }
+
+    // Keep open details across re-renders
+    this.el.addEventListener(
+      'toggle',
+      (e) => {
+        const d = e.target as HTMLDetailsElement;
+        const key = d.dataset.setup || d.dataset.key;
+        if (!key) return;
+        if (d.open) this.openDetails.add(key);
+        else this.openDetails.delete(key);
+      },
+      true,
+    );
+
+    // List event delegation
     this.list.addEventListener('click', (e) => {
       const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-act]');
       if (!b) return;
+
       if (b.dataset.act === 'thread') {
-        const messages = this.list.querySelector<HTMLElement>('.messages')!;
-        if (this.selected && this.messagesKey) {
-          this.scrolls.set(this.selected, messages.scrollTop);
-          if (this.reply) this.drafts.set(this.selected, this.reply);
-        }
         this.selected = b.dataset.id;
-        this.reply = this.drafts.get(this.selected!);
-        this.composing = false;
+        this.reply = undefined;
         this.browsing = false;
         this.messagesKey = '';
         this.composerKey = '';
         this.renderList();
         return;
       }
+
+      if (b.dataset.act === 'pin-conv') {
+        const id = b.dataset.id!;
+        const currentMeta = store.conversationsMeta.find((m) => m.id === id);
+        const newPinned = !(currentMeta?.pinned ?? false);
+        this.send({
+          type: 'conversation.meta',
+          meta: { id, title: currentMeta?.title, pinned: newPinned },
+        });
+        return;
+      }
+
+      if (b.dataset.act === 'rename-conv') {
+        const id = b.dataset.id!;
+        const currentMeta = store.conversationsMeta.find((m) => m.id === id);
+        const newTitle = prompt('Название разговора:', currentMeta?.title ?? '');
+        if (newTitle !== null) {
+          this.send({
+            type: 'conversation.meta',
+            meta: { id, title: newTitle.trim() || undefined, pinned: currentMeta?.pinned },
+          });
+        }
+        return;
+      }
+
+      if (b.dataset.act === 'export-md') {
+        const id = b.dataset.id!;
+        const groups = conversations(this.tasks, store.conversationsMeta);
+        const group = groups.find((c) => c.id === id);
+        if (group) {
+          const md = exportConversationToMarkdown(group);
+          const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `conversation-${id.slice(0, 8)}.md`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+        }
+        return;
+      }
+
       if (b.dataset.act === 'copy') {
         const task = this.tasks.find((t) => t.id === b.dataset.id);
-        if (task?.result) void navigator.clipboard.writeText(task.result).then(() => { b.textContent = 'Скопировано'; }, () => { b.textContent = 'Выделите текст для копирования'; });
+        if (task?.result) {
+          void navigator.clipboard.writeText(task.result).then(
+            () => {
+              b.textContent = 'Скопировано';
+            },
+            () => {
+              b.textContent = 'Выделите текст для копирования';
+            },
+          );
+        }
       }
       if (b.dataset.act === 'download') {
         const task = this.tasks.find((t) => t.id === b.dataset.id);
         if (task?.result) {
           const url = URL.createObjectURL(new Blob([task.result], { type: 'text/markdown;charset=utf-8' }));
-          const link = document.createElement('a'); link.href = url; link.download = `${base(task.cwd)}-${task.id}.md`; link.click(); URL.revokeObjectURL(url);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = `${base(task.cwd)}-${task.id}.md`;
+          link.click();
+          URL.revokeObjectURL(url);
         }
       }
-      if (b.dataset.act === 'save') {
-        const path = window.prompt('Относительный путь внутри проекта', 'artifacts/result.md')?.trim();
-        if (path) this.send({ type: 'artifact.save', taskId: b.dataset.id!, path, format: 'md', requestId: crypto.randomUUID() });
-      }
+      if (b.dataset.act === 'save') this.promptSaveArtifact(b.dataset.id!);
       if (b.dataset.act === 'cancel') this.send({ type: 'task.cancel', id: b.dataset.id! });
+
       if (b.dataset.act === 'bottom') {
         const messages = this.list.querySelector<HTMLElement>('.messages')!;
         messages.scrollTop = messages.scrollHeight;
       }
+
       if (b.dataset.act === 'show') this.onShowAgent(b.dataset.id!);
+
       if (b.dataset.act === 'reply') {
         if (this.reply?.pending) return;
         const task = this.tasks.find((t) => t.id === b.dataset.id);
-        this.reply = { taskId: b.dataset.id!, draft: this.reply?.draft ?? '', access: this.reply?.access ?? task?.access ?? 'read' };
+        this.reply = {
+          taskId: b.dataset.id!,
+          draft: this.reply?.draft ?? '',
+          access: this.reply?.access ?? task?.access ?? 'read',
+        };
         this.composerKey = '';
         this.renderList();
         this.list.querySelector<HTMLTextAreaElement>('.reply textarea')?.focus();
       }
+
       if (b.dataset.act === 'reply-access' && this.reply) {
         this.reply.access = b.dataset.value as Access;
         this.renderList();
       }
+
       if (b.dataset.act === 'reply-send') this.sendReply();
     });
+
     this.list.addEventListener('input', (e) => {
       const area = e.target as HTMLTextAreaElement;
       if (this.reply && area.matches('.reply textarea')) {
@@ -420,9 +598,11 @@ export class TaskBoardPanel {
         if (this.selected) this.drafts.set(this.selected, this.reply);
       }
     });
+
     this.list.addEventListener('keydown', (e) => {
-      // Ctrl+Enter sends the reply, like in a chat.
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && (e.target as HTMLElement).matches('.reply textarea')) this.sendReply();
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && (e.target as HTMLElement).matches('.reply textarea')) {
+        this.sendReply();
+      }
     });
   }
 
@@ -445,7 +625,6 @@ export class TaskBoardPanel {
     this.renderList();
   }
 
-  /** The reply form: continues the agent's session, so it remembers the task. */
   private replyForm(t: Task): string {
     const r = this.reply!;
     const seg = (value: Access, label: string) =>
@@ -481,153 +660,85 @@ export class TaskBoardPanel {
     if (current && [...project.options].some((o) => o.value === current)) project.value = current;
     this.field<HTMLInputElement>('customPath').hidden = project.value !== OTHER;
 
-    // Pick an installed default only once. Later availability changes must not replace the user's choice.
     for (const ex of EXECUTORS) {
       const b = this.form.querySelector<HTMLButtonElement>(`.seg[data-name="executor"] button[data-value="${ex}"]`)!;
       b.disabled = false;
       b.title = c.executors[ex].note ?? '';
     }
+
     if (!this.initialized) {
       const other = EXECUTORS.find((e) => c.executors[e].available && c.executors[e].models.length);
       if (other) {
         this.setSeg('executor', other);
         this.field<HTMLSelectElement>('plannerExecutor').value = other;
+        this.modelCtrl.setValue(other, c.executors[other].models[0]?.id ?? '');
       }
       this.initialized = true;
     }
-    this.fillModels();
-    this.fillReviewModels();
-    this.fillPlannerModels();
+
+    this.modelCtrl.updateCatalog();
     this.renderSetup();
     this.updateNotes();
   }
 
-  private fillModels(): void {
-    const c = this.config;
-    if (!c) return;
-    const models = c.executors[this.seg('executor') as Executor]?.models ?? [];
-    const select = this.field<HTMLSelectElement>('model');
-    this.fillModelSelect(select, models);
-    this.fillEfforts();
-  }
-
-  private fillEfforts(): void {
-    const ex = this.seg('executor') as Executor;
-    const model = this.config?.executors[ex]?.models.find((m) => m.id === this.field<HTMLSelectElement>('model').value);
-    const select = this.field<HTMLSelectElement>('effort');
-    const current = select.value;
-    const def = model?.defaultEffort ? ` (${model.defaultEffort})` : '';
-    select.innerHTML = `<option value="">по умолчанию${esc(def)}</option>` + (model?.efforts ?? []).map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join('');
-    // Board updates refill the lists; keep what the user picked if the model still offers it.
-    if (current && model?.efforts?.includes(current)) select.value = current;
-    select.disabled = !model?.efforts?.length;
-    this.updateTeam();
-  }
-
-  private fillReviewModels(): void {
-    for (const ex of EXECUTORS) {
-      const models = this.config?.executors[ex]?.models ?? [];
-      const select = this.field<HTMLSelectElement>(`reviewModel-${ex}`);
-      this.fillModelSelect(select, models);
-      this.form.querySelector<HTMLElement>(`[data-reviewer="${ex}"] [data-review-status]`)!.textContent = this.config?.executors[ex]?.available && models.length ? 'доступен' : 'недоступен';
-      this.fillReviewEfforts(ex);
-    }
-  }
-
-  private fillPlannerModels(): void {
-    const executor = this.field<HTMLSelectElement>('plannerExecutor');
-    for (const option of executor.options) {
-      const ex = option.value as Executor;
-      option.textContent = `${EXECUTOR[ex]}${this.config?.executors[ex]?.available ? '' : ' — недоступен'}`;
-    }
-    const models = this.config?.executors[executor.value as Executor]?.models ?? [];
-    const select = this.field<HTMLSelectElement>('plannerModel');
-    this.fillModelSelect(select, models);
-    this.fillPlannerEfforts();
-  }
-
-  private fillPlannerEfforts(): void {
-    const ex = this.field<HTMLSelectElement>('plannerExecutor').value as Executor;
-    const model = this.config?.executors[ex]?.models.find((m) => m.id === this.field<HTMLSelectElement>('plannerModel').value);
-    const select = this.field<HTMLSelectElement>('plannerEffort');
-    const current = select.value;
-    select.innerHTML = `<option value="">по умолчанию${model?.defaultEffort ? ` (${esc(model.defaultEffort)})` : ''}</option>` + (model?.efforts ?? []).map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join('');
-    if (current && model?.efforts?.includes(current)) select.value = current;
-    select.disabled = !model?.efforts?.length;
-    this.updateTeam();
-  }
-
-  private fillReviewEfforts(ex: Executor): void {
-    const model = this.config?.executors[ex]?.models.find((m) => m.id === this.field<HTMLSelectElement>(`reviewModel-${ex}`).value);
-    const select = this.field<HTMLSelectElement>(`reviewEffort-${ex}`);
-    const current = select.value;
-    const def = model?.defaultEffort ? ` (${model.defaultEffort})` : '';
-    select.innerHTML = `<option value="">по умолчанию${esc(def)}</option>` + (model?.efforts ?? []).map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join('');
-    if (current && model?.efforts?.includes(current)) select.value = current;
-    select.disabled = !model?.efforts?.length;
-    this.updateTeam();
-  }
-
-  private fillModelSelect(select: HTMLSelectElement, models: ModelOption[]): void {
-    const current = select.value;
-    select.innerHTML = models.map((m) => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('');
-    if (current && !models.some((m) => m.id === current)) select.insertAdjacentHTML('afterbegin', `<option value="${esc(current)}">${esc(current)} — недоступна</option>`);
-    if (current) select.value = current;
-    select.disabled = !models.length;
-  }
-
   private renderSetup(): void {
     const container = this.form.querySelector<HTMLElement>('[data-cli-status]')!;
-    // Preserve expanded instructions while refreshed statuses arrive.
-    const open = new Set([...container.querySelectorAll<HTMLDetailsElement>('details[open]')].map((el) => el.dataset.setup));
     container.innerHTML = EXECUTORS.map((ex) => {
       const status = this.config?.executors[ex];
       const ready = status?.available && status.models.length;
       const setup = SETUP[ex];
-      return `<details data-setup="${ex}" ${open.has(ex) ? 'open' : ''}>
+      const isOpen = this.openDetails.has(ex);
+      return `<details data-setup="${ex}" ${isOpen ? 'open' : ''}>
         <summary>${EXECUTOR[ex]} — ${ready ? 'доступен' : 'недоступен'} · инструкция</summary>
         ${status?.note ? `<p class="note">${esc(status.note)}</p>` : ''}
         <p>1. Установите CLI в терминале:</p><pre>${esc(setup.install)}</pre>
         <p>2. Откройте новый терминал и выполните вход:</p><pre>${esc(setup.login)}</pre>
         <p>3. Проверьте <code>${ex === 'antigravity' ? 'agy' : ex} --version</code> и обновите доступность.</p>
         <a href="${setup.url}" target="_blank" rel="noopener noreferrer">Официальная инструкция ${EXECUTOR[ex]}</a>
-        ${ex === 'antigravity' ? '<p class="note">Нужен отдельный agy CLI. Интеграция экспериментальная; установка редактора сама по себе не гарантирует доступность CLI.</p>' : ''}
       </details>`;
     }).join('');
   }
 
-  private selectedTeam(): { planner?: { executor: Executor; model: string; effort?: string }; colleague: { executor: Executor; model: string; effort?: string }[] } {
+  private selectedTeam(): {
+    planner?: { executor: Executor; model: string; effort?: string };
+    colleague: { executor: Executor; model: string; effort?: string }[];
+  } {
     const participant = (executor: Executor, model: string, effort: string) => ({ executor, model, effort: effort || undefined });
     if (!this.field<HTMLInputElement>('team').checked) return { colleague: [] };
+    const modelVal = this.modelCtrl.getValue();
     return {
-      ...(this.field<HTMLInputElement>('usePlanner').checked ? { planner: participant(this.field<HTMLSelectElement>('plannerExecutor').value as Executor, this.field<HTMLSelectElement>('plannerModel').value, this.field<HTMLSelectElement>('plannerEffort').value) } : {}),
-      colleague: EXECUTORS.filter((ex) => this.field<HTMLInputElement>(`review-${ex}`).checked).map((ex) => participant(ex, this.field<HTMLSelectElement>(`reviewModel-${ex}`).value, this.field<HTMLSelectElement>(`reviewEffort-${ex}`).value)),
+      ...(this.field<HTMLInputElement>('usePlanner').checked
+        ? {
+            planner: participant(
+              this.field<HTMLSelectElement>('plannerExecutor').value as Executor,
+              modelVal.model,
+              modelVal.effort ?? '',
+            ),
+          }
+        : {}),
+      colleague: [],
     };
   }
 
   private selectionIssue(): string | undefined {
     if (!this.config) return 'Проверяем доступность агентов…';
-    const team = this.selectedTeam();
-    const selected = [{ executor: this.seg('executor') as Executor, model: this.field<HTMLSelectElement>('model').value }, ...(team.planner ? [team.planner] : []), ...team.colleague];
-    const blocked = selected.filter((p) => !this.config?.executors[p.executor]?.available || !this.config.executors[p.executor].models.some((m) => m.id === p.model));
-    if (!blocked.length) return undefined;
-    return [...new Set(blocked.map((p) => `${EXECUTOR[p.executor]}: ${this.config?.executors[p.executor]?.note ?? 'нет доступной модели'}`))].join('\n') + '\nВыберите доступного исполнителя, отключите недоступный этап или настройте CLI: «Агенты: доступность и установка».';
+    const curVal = this.modelCtrl.getValue();
+    const ex = curVal.executor;
+    const status = this.config?.executors[ex];
+    if (!status?.available) {
+      return `${EXECUTOR[ex]}: CLI не доступен на компьютере. Выберите другого исполнителя или настройте доступность.`;
+    }
+    return undefined;
   }
 
   private updateTeam(): void {
-    const team = this.selectedTeam();
-    this.form.querySelector<HTMLElement>('[data-planner-options]')!.hidden = !this.field<HTMLInputElement>('usePlanner').checked;
-    for (const ex of EXECUTORS) this.form.querySelector<HTMLElement>(`[data-reviewer="${ex}"] [data-review-options]`)!.hidden = !this.field<HTMLInputElement>(`review-${ex}`).checked;
-    const stages = [...(team.planner ? [`План: ${EXECUTOR[team.planner.executor]}`] : []), `Выполнение: ${EXECUTOR[this.seg('executor') as Executor]}`, ...team.colleague.map((p) => `Проверка: ${EXECUTOR[p.executor]}`), ...(team.planner || team.colleague.length ? ['Итог исполнителя'] : [])];
-    const collaborative = !!(team.planner || team.colleague.length);
-    this.form.querySelector<HTMLElement>('[data-team-summary]')!.textContent = collaborative ? stages.join(' → ') : 'Дополнительные этапы отключены — будет отправлена обычная задача.';
     const issue = this.selectionIssue();
     const note = this.form.querySelector<HTMLElement>('[data-team-issue]')!;
     note.textContent = issue ?? '';
     note.hidden = !issue;
     const submit = this.form.querySelector<HTMLButtonElement>('button[type="submit"]')!;
     submit.disabled = !!this.pending || !!issue;
-    submit.textContent = this.pending ? 'Отправляется…' : collaborative ? 'Отправить команде' : 'Отправить задачу';
+    submit.textContent = this.pending ? 'Отправляется…' : 'Отправить задачу';
   }
 
   private updateNotes(): void {
@@ -636,13 +747,14 @@ export class TaskBoardPanel {
     const text = this.config?.executors[ex]?.note;
     note.textContent = text ?? '';
     note.hidden = !text;
-    this.form.querySelector<HTMLElement>('[data-note="access"]')!.textContent = ACCESS_HINT[ex]?.[this.seg('access') as Access] ?? '';
+    this.form.querySelector<HTMLElement>('[data-note="access"]')!.textContent =
+      ACCESS_HINT[ex]?.[this.seg('access') as Access] ?? '';
     const project = this.field<HTMLSelectElement>('project').value;
-    // The board knows Git status only for listed folders; for a typed path it says so instead of guessing.
     const git = this.form.querySelector<HTMLElement>('[data-note="git"]')!;
     const writing = this.seg('access') === 'write';
     if (writing && project === OTHER) {
-      git.textContent = 'Для этой папки не проверено, есть ли Git. Без Git изменения будет сложнее просмотреть и откатить; в карточке задачи появится отметка «вне Git».';
+      git.textContent =
+        'Для этой папки не проверено, есть ли Git. Без Git изменения будет сложнее просмотреть и откатить; в карточке задачи появится отметка «вне Git».';
       git.hidden = false;
     } else if (writing && this.config?.outsideGit.includes(project)) {
       git.textContent = 'Папка не в Git-репозитории: изменения будет сложнее просмотреть и откатить.';
@@ -661,65 +773,139 @@ export class TaskBoardPanel {
     const issue = this.selectionIssue();
     if (issue) return this.showError(issue);
     if (this.pending) return;
+
+    const curModel = this.modelCtrl.getValue();
     const requestId = crypto.randomUUID();
-    const selection = this.selectedTeam();
-    const team = !!(selection.planner || selection.colleague.length);
+
     const ok = this.send({
-      type: team ? 'team.create' : 'task.create',
-      ...(team ? selection : {}),
+      type: 'task.create',
       requestId,
       task: {
         prompt,
         cwd,
-        executor: this.seg('executor') as Executor,
-        model: this.field<HTMLSelectElement>('model').value,
-        effort: this.field<HTMLSelectElement>('effort').value || undefined,
+        executor: curModel.executor,
+        model: curModel.model,
+        effort: curModel.effort,
         access: this.seg('access') as Access,
       },
     });
+
     if (!ok) return this.showError('Нет связи с демоном');
     this.pending = { id: requestId, prompt };
     this.updateTeam();
   }
 
   private renderList(): void {
-    const groups = conversations(this.tasks);
+    const groups = conversations(this.tasks, store.conversationsMeta);
     if (!this.selected || !groups.some((c) => c.id === this.selected)) this.selected = groups[0]?.id;
+
     this.form.hidden = !this.composing && !!groups.length;
     this.list.hidden = this.composing;
+
     const nav = this.list.querySelector<HTMLElement>('.conversation-list')!;
     nav.hidden = !this.browsing;
     this.el.querySelector<HTMLInputElement>('.conversation-search')!.hidden = !this.browsing || this.composing;
-    const navHtml = groups.filter((c) => !this.search || c.turns.some((t) => `${t.prompt} ${t.cwd} ${t.executor}`.toLocaleLowerCase().includes(this.search))).map((c) => {
-      const first = c.turns[0], last = c.turns.at(-1)!;
-      const status = c.turns.find(isLive) ?? last;
-      return `<button type="button" data-act="thread" data-id="${esc(c.id)}" class="thread-row ${this.selected === c.id ? 'selected' : ''}" aria-pressed="${this.selected === c.id}"><span class="thread-title">${esc(first.prompt)}</span><span class="thread-meta">${EXECUTOR[last.executor]} · ${esc(base(first.cwd))} · ${c.turns.length} ход.</span><span class="chip ${status.status}">${STATUS[status.status]}</span></button>`;
-    }).join('') || '<p class="empty">Разговоры не найдены</p>';
+
+    const navHtml =
+      groups
+        .filter(
+          (c) =>
+            !this.search ||
+            c.turns.some((t) => `${t.prompt} ${t.cwd} ${t.executor}`.toLocaleLowerCase().includes(this.search)),
+        )
+        .map((c) => {
+          const first = c.turns[0];
+          const last = c.turns.at(-1)!;
+          const status = c.turns.find(isLive) ?? last;
+          const title = c.title || first.prompt;
+          const pinBadge = c.pinned ? '<span class="thread-pin-icon">📌</span>' : '';
+
+          return `<button type="button" data-act="thread" data-id="${esc(c.id)}" class="thread-row ${
+            this.selected === c.id ? 'selected' : ''
+          } ${c.pinned ? 'pinned' : ''}" aria-pressed="${this.selected === c.id}">
+            <span class="thread-title">${pinBadge}${esc(title)}</span>
+            <span class="thread-meta">${EXECUTOR[last.executor]} · ${esc(base(first.cwd))} · ${c.turns.length} ход.</span>
+            <span class="chip ${status.status}">${STATUS[status.status]}</span>
+          </button>`;
+        })
+        .join('') || '<p class="empty">Разговоры не найдены</p>';
+
     if (nav.innerHTML !== navHtml) nav.innerHTML = navHtml;
+
     const conversation = this.list.querySelector<HTMLElement>('.conversation')!;
     const group = groups.find((c) => c.id === this.selected);
     conversation.hidden = !group || this.browsing;
     if (!group || this.browsing) return;
+
     const last = group.turns.at(-1)!;
     const active = group.turns.find(isLive);
     const head = this.list.querySelector<HTMLElement>('.conversation-head')!;
-    const headHtml = `<span>${EXECUTOR[last.executor]} · ${esc(base(last.cwd))} · ${STATUS[(active ?? last).status]}</span><button type="button" data-act="bottom">↓ К последним</button>`;
+
+    // Total characters in conversation for context budget gauge
+    const totalChars = group.turns.reduce((acc, t) => acc + t.prompt.length + (t.result?.length ?? 0), 0);
+    const contextGauge = renderContextBudgetGauge(totalChars, 400000);
+
+    const titleText = group.title || group.turns[0].prompt.slice(0, 36);
+
+    const headHtml = `
+      <div>
+        <div class="conv-head-actions">
+          ${group.pinned ? '<span class="thread-pin-icon" title="Закреплен">📌</span>' : ''}
+          <strong>${esc(titleText)}</strong>
+          <button type="button" class="btn small" data-act="rename-conv" data-id="${esc(group.id)}" title="Переименовать">✎</button>
+          <button type="button" class="btn small" data-act="pin-conv" data-id="${esc(group.id)}" title="${group.pinned ? 'Открепить' : 'Закрепить'}">${group.pinned ? 'Открепить' : 'Закрепить 📌'}</button>
+          <button type="button" class="export-md-btn" data-act="export-md" data-id="${esc(group.id)}" title="Скачать Markdown">📥 Экспорт MD</button>
+        </div>
+        <div class="note">${EXECUTOR[last.executor]} · ${esc(base(last.cwd))} · ${STATUS[(active ?? last).status]}</div>
+        ${contextGauge}
+      </div>
+      <button type="button" data-act="bottom">↓ К последним</button>
+    `;
+
     if (head.innerHTML !== headHtml) head.innerHTML = headHtml;
+
     const messages = this.list.querySelector<HTMLElement>('.messages')!;
-    const html = group.turns.map((t) => `<article class="conversation-turn" data-turn="${esc(t.id)}">
-      <div class="message user"><div class="message-label">Вы · ${new Date(t.createdAt).toLocaleString()}${t.continues ? ' · продолжение' : ''}</div><div class="message-body">${messageHtml(t.prompt)}</div></div>
-      <div class="message assistant"><div class="message-label">${EXECUTOR[t.executor]} · ${esc(t.model)} · ${STATUS[t.status]}</div><div class="message-body">${t.result ? messageHtml(t.result) : isLive(t) ? 'Агент работает…' : 'Ответ отсутствует'}</div>
-      <div class="task-actions">${t.result ? `<button type="button" data-act="copy" data-id="${esc(t.id)}">Копировать</button><button type="button" data-act="download" data-id="${esc(t.id)}">Скачать .md</button><button type="button" data-act="save" data-id="${esc(t.id)}">Сохранить в проект…</button>` : ''}${t.agentId && this.known.has(t.agentId) ? `<button type="button" data-act="show" data-id="${esc(t.agentId)}">В офисе</button>` : ''}${isLive(t) ? `<button type="button" data-act="cancel" data-id="${esc(t.id)}">Отменить</button>` : t.agentId && !active && !t.orphans ? `<button type="button" data-act="reply" data-id="${esc(t.id)}">Ответить на этот ход</button>` : ''}</div></div></article>`).join('');
+    const html = group.turns
+      .map(
+        (t) => `<article class="conversation-turn" data-turn="${esc(t.id)}">
+      <div class="message user"><div class="message-label">Вы · ${new Date(t.createdAt).toLocaleString()}${
+          t.continues ? ' · продолжение' : ''
+        }</div><div class="message-body">${messageHtml(t.prompt)}</div></div>
+      <div class="message assistant"><div class="message-label">${EXECUTOR[t.executor]} · ${esc(t.model)} · ${
+          STATUS[t.status]
+        }</div><div class="message-body">${
+          t.result ? messageHtml(t.result) : isLive(t) ? 'Агент работает…' : 'Ответ отсутствует'
+        }${this.liveOutput(t)}</div>
+      <div class="task-actions">${
+        t.result && !isLive(t)
+          ? `<button type="button" data-act="copy" data-id="${esc(t.id)}">Копировать</button><button type="button" data-act="download" data-id="${esc(t.id)}">Скачать .md</button><button type="button" data-act="save" data-id="${esc(t.id)}">Сохранить в проект…</button>`
+          : ''
+      }${
+          t.agentId && this.known.has(t.agentId)
+            ? `<button type="button" data-act="show" data-id="${esc(t.agentId)}">В офисе</button>`
+            : ''
+        }${
+          isLive(t)
+            ? `<button type="button" data-act="cancel" data-id="${esc(t.id)}">Отменить</button>`
+            : t.agentId && !active && !t.orphans
+            ? `<button type="button" data-act="reply" data-id="${esc(t.id)}">Ответить на этот ход</button>`
+            : ''
+        }</div></div></article>`,
+      )
+      .join('');
+
     const key = group.id + html;
     if (key !== this.messagesKey) {
       const same = this.messagesKey.startsWith(group.id + '<');
       const bottom = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 60;
       const top = messages.scrollTop;
       const missing = group.turns.some((t) => t.continues && !this.tasks.some((p) => p.id === t.continues));
-      messages.innerHTML = (missing ? '<p class="note">Ранние сообщения этого разговора больше не хранятся в истории.</p>' : '') + html;
+      messages.innerHTML =
+        (missing ? '<p class="note">Ранние сообщения этого разговора больше не хранятся в истории.</p>' : '') + html;
       messages.scrollTop = same ? (bottom ? messages.scrollHeight : top) : (this.scrolls.get(group.id) ?? messages.scrollHeight);
       this.messagesKey = key;
     }
+
     const composer = this.list.querySelector<HTMLElement>('.composer')!;
     if (!this.reply || !group.turns.some((t) => t.id === this.reply!.taskId)) {
       this.reply = this.drafts.get(group.id) ?? { taskId: last.id, draft: '', access: last.access };
@@ -727,22 +913,29 @@ export class TaskBoardPanel {
     const target = group.turns.find((t) => t.id === this.reply?.taskId) ?? last;
     const canReply = !active && !!target.agentId && !target.orphans;
     const composerKey = JSON.stringify([group.id, target.id, canReply, this.reply.access, this.reply.pending, this.reply.error]);
+
     if (composerKey !== this.composerKey) {
       const area = composer.querySelector<HTMLTextAreaElement>('textarea');
       const focus = area && document.activeElement === area ? [area.selectionStart, area.selectionEnd] : undefined;
-      composer.innerHTML = canReply ? `<div class="reply-context">Ответ ${EXECUTOR[target.executor]}${target.id !== last.id ? ' на выбранный ход' : ''} · Ctrl+Enter</div>${this.replyForm(target)}` : `<p class="note">${active ? 'Ответить можно после завершения текущего хода.' : target.orphans ? 'Отмена не подтверждена: продолжение пока недоступно.' : 'У этой задачи нет сессии для продолжения.'}</p>`;
+      composer.innerHTML = canReply
+        ? `<div class="reply-context">Ответ ${EXECUTOR[target.executor]}${
+            target.id !== last.id ? ' на выбранный ход' : ''
+          } · Ctrl+Enter</div>${this.replyForm(target)}`
+        : `<p class="note">${
+            active
+              ? 'Ответить можно после завершения текущего хода.'
+              : target.orphans
+              ? 'Отмена не подтверждена: продолжение пока недоступно.'
+              : 'У этой задачи нет сессии для продолжения.'
+          }</p>`;
+
       const next = composer.querySelector<HTMLTextAreaElement>('textarea');
-      if (focus && next) { next.focus({ preventScroll: true }); next.setSelectionRange(focus[0], focus[1]); }
+      if (focus && next) {
+        next.focus({ preventScroll: true });
+        next.setSelectionRange(focus[0], focus[1]);
+      }
       this.composerKey = composerKey;
     }
   }
 
-  private renderMcpBanner(): void {
-    const banner = this.el.querySelector<HTMLElement>('[data-mcp-banner]');
-    if (!banner) return;
-    const missing = this.mcpStatuses.filter((status) => status.status !== 'installed');
-    banner.hidden = missing.length === 0;
-    if (!missing.length) return;
-    banner.innerHTML = `<strong>⚠️ Не установлены обязательные MCP (${missing.length} из 4)</strong><span>${missing.map((status) => `${esc(status.name)}: ${esc(status.status)} <button type="button" data-mcp-install="${esc(status.name)}">Установить</button>`).join(' · ')}</span><button type="button" data-mcp-install>Установить все недостающие MCP</button>`;
-  }
 }

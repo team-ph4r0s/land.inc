@@ -46,7 +46,7 @@ export interface PreparedRun {
  */
 export interface Executor {
   readonly id: ExecutorId;
-  status(): ExecutorStatus;
+  status(catalogModels?: ModelOption[]): ExecutorStatus;
   command(): Command | undefined;
   /** Forget CLI discovery after the user installs or updates an agent. */
   refresh?(): void;
@@ -54,7 +54,7 @@ export interface Executor {
    * `onAgent` reports an agent id learned from the output (Codex prints its thread id).
    * With `resume`, the run continues that agent session instead of starting a new one.
    */
-  prepare(task: Task, onAgent: (agentId: string) => void, resume?: string): PreparedRun;
+  prepare(task: Task, onAgent: (agentId: string) => void, resume?: string, captureLimit?: number): PreparedRun;
   /** The CLI's own session id for an office agent id, if this executor can resume it. */
   sessionOf?(agentId: string): string | undefined;
   /** Folders this agent worked in recently, with the time of last use. */

@@ -1,5 +1,5 @@
 import { Container, Graphics, Text } from 'pixi.js';
-import type { AgentState, Collaboration, UpdateState } from '@land/protocol';
+import type { AgentState, Collaboration, TeamRun, UpdateState } from '@land/protocol';
 import { AgentSprite, type Detail } from './agent';
 import { iso } from './iso';
 import { DESKS, DOOR, HOME, H, W, SPOTS, ZONE_OF, type Desk, type Tile } from './layout';
@@ -19,6 +19,9 @@ export class Office {
   private deskOwner = new Map<Desk, string>();
   private spotOwner = new Map<string, string>();
   private links = new Graphics();
+  private handoffsGfx = new Graphics();
+  private handoffs: { from: Tile; to: Tile; t: number; duration: number }[] = [];
+  private teamRuns = new Map<string, TeamRun>();
   private fires = new Map<Desk, Graphics>();
   private extinguished = new Map<string, number>();
   private t = 0;
@@ -38,7 +41,9 @@ export class Office {
     this.scene = scene;
     this.residents = new OfficeResidents(world);
     this.links.zIndex = 99999;
+    this.handoffsGfx.zIndex = 99998;
     world.addChild(this.links);
+    world.addChild(this.handoffsGfx);
     for (const { desk } of scene.desks) {
       const fire = new Graphics();
       fire.zIndex = 90000;
@@ -159,6 +164,83 @@ export class Office {
     this.collabs = new Map(list.map((c) => [c.id, c]));
   }
 
+  triggerArtifactHandoff(from: Tile, to: Tile): void {
+    this.handoffs.push({ from, to, t: 0, duration: 1.5 });
+  }
+
+  setTeamRuns(runs: TeamRun[]): void {
+    const prevRuns = this.teamRuns;
+    this.teamRuns = new Map(runs.map((r) => [r.id, r]));
+
+    for (const r of runs) {
+      const prev = prevRuns.get(r.id);
+      if (!prev) continue;
+      for (let i = 0; i < r.steps.length; i++) {
+        if (r.steps[i].status === 'done' && prev.steps[i]?.status !== 'done') {
+          const fromSeat = { x: 19 + (i % 3), y: 8 };
+          const toSeat = { x: 19 + ((i + 1) % 3), y: 11 };
+          this.triggerArtifactHandoff(fromSeat, toSeat);
+        }
+      }
+    }
+
+    this.syncTeamStageBubbles();
+  }
+
+  teamRun(run: TeamRun): void {
+    const prev = this.teamRuns.get(run.id);
+    this.teamRuns.set(run.id, run);
+
+    if (prev) {
+      for (let i = 0; i < run.steps.length; i++) {
+        if (run.steps[i].status === 'done' && prev.steps[i]?.status !== 'done') {
+          const fromSeat = { x: 19 + (i % 3), y: 8 };
+          const toSeat = { x: 19 + ((i + 1) % 3), y: 11 };
+          this.triggerArtifactHandoff(fromSeat, toSeat);
+        }
+      }
+    }
+
+    this.syncTeamStageBubbles();
+  }
+
+  private syncTeamStageBubbles(): void {
+    for (const a of this.agents.values()) a.setTeamStage(undefined);
+
+    for (const r of this.teamRuns.values()) {
+      if (r.status !== 'running') continue;
+      const curIdx = r.steps.findIndex((s) => s.status === 'running');
+      if (curIdx < 0) continue;
+      const step = r.steps[curIdx];
+
+      let stageText = 'Выполняет этап…';
+      if (step.kind === 'worker') {
+        if (step.produces === 'ChapterDraft' || step.produces === 'ChapterOutline') stageText = 'Пишет главу…';
+        else if (step.produces === 'ArchitectureSpec') stageText = 'Проектирует архитектуру…';
+        else if (step.produces === 'ImplementationDiff') stageText = 'Пишет код…';
+        else stageText = 'Выполняет работу…';
+      } else if (step.kind === 'critic') {
+        stageText = 'Проверяет логику…';
+      } else if (step.kind === 'fixer') {
+        stageText = 'Вносит правки…';
+      } else if (step.kind === 'synthesizer') {
+        stageText = 'Синтезирует решение…';
+      } else if (step.kind === 'manager') {
+        stageText = 'Координирует команду…';
+      }
+
+      let targetSprite: AgentSprite | undefined;
+      if (step.agentId) targetSprite = this.agents.get(step.agentId);
+      if (!targetSprite && step.taskId) targetSprite = [...this.agents.values()].find((a) => a.state.taskId === step.taskId);
+      if (!targetSprite) targetSprite = [...this.agents.values()].find((a) => a.state.source === step.executor);
+      if (!targetSprite && this.agents.size > 0) targetSprite = [...this.agents.values()][0];
+
+      if (targetSprite) {
+        targetSprite.setTeamStage(stageText, 0.5);
+      }
+    }
+  }
+
   /** A collaboration changed: whoever just handed a turn over walks to the meeting room and says what. */
   collab(c: Collaboration): void {
     const before = this.collabs.get(c.id);
@@ -172,6 +254,7 @@ export class Office {
       this.meetings.set(a.state.id, performance.now() + MEETING_MS);
       a.say(`Передаю коллеге: ${turn.handoff.length > 90 ? turn.handoff.slice(0, 89) + '…' : turn.handoff}`, MEETING_MS);
       this.route(a, true);
+      this.triggerArtifactHandoff({ x: 19.5, y: 8.5 }, { x: 21.5, y: 11.5 });
     });
   }
 
@@ -203,6 +286,31 @@ export class Office {
     }
     this.wander();
     this.paint();
+
+    // Render flying artifact handoffs in meeting room
+    this.handoffsGfx.clear();
+    for (let i = this.handoffs.length - 1; i >= 0; i--) {
+      const h = this.handoffs[i];
+      h.t += dt / h.duration;
+      if (h.t >= 1) {
+        this.handoffs.splice(i, 1);
+        continue;
+      }
+      const s = iso(h.from.x, h.from.y);
+      const e = iso(h.to.x, h.to.y);
+      const p = h.t;
+      const x = s.x + (e.x - s.x) * p;
+      const y = s.y + (e.y - s.y) * p - Math.sin(p * Math.PI) * 36;
+
+      this.handoffsGfx.circle(x, y - 20, 7).fill({ color: 0xffd166, alpha: 0.95 });
+      this.handoffsGfx.circle(x, y - 20, 14).fill({ color: 0xffd166, alpha: 0.35 });
+      for (let k = 1; k <= 3; k++) {
+        const lag = Math.max(0, p - k * 0.08);
+        const lx = s.x + (e.x - s.x) * lag;
+        const ly = s.y + (e.y - s.y) * lag - Math.sin(lag * Math.PI) * 36;
+        this.handoffsGfx.circle(lx, ly - 20, 4 - k).fill({ color: 0x4285f4, alpha: 0.7 - k * 0.2 });
+      }
+    }
     // Plates move with their agents; re-check overlaps a few times a second, not every frame.
     if (now >= this.nextLayout) {
       this.nextLayout = now + 250;

@@ -4,20 +4,15 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ModelOption, Task } from '@land/protocol';
 import { clip } from '../activity.ts';
-import { cliCommand, compareVersions, headCwd, mtime, safeDir } from './files.ts';
-import { locateCli, probeCommand } from './locator.ts';
+import { cliFailure, stripAnsi } from '../ansi.ts';
+import { claudeModels } from '../model-catalog.ts';
+import { findCli, compareVersions, headCwd, mtime, safeDir } from './files.ts';
 import type { Command, Executor, ExecutorStatus, OutputParser, PreparedRun } from './types.ts';
-
-export const CLAUDE_MODELS: ModelOption[] = [
-  { id: 'claude-opus-5-5', label: 'Opus 5.5' },
-  { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
-  { id: 'claude-haiku-5-5', label: 'Haiku 5.5' },
-  { id: 'claude-fable-5-1', label: 'Fable 5.1' },
-].map((m) => ({ ...m, efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }));
 
 export interface ClaudeOptions {
   /** Override the CLI, e.g. a fake one in tests. */
   command?: Command;
+  pathOverride?: () => string | undefined;
 }
 
 /** Claude Code in print mode (`claude -p`), the CLI bundled with Claude Desktop or a standalone one. */
@@ -25,9 +20,11 @@ export class ClaudeExecutor implements Executor {
   readonly id = 'claude' as const;
   private override?: Command;
   private found?: Command | null;
+  private pathOverride?: () => string | undefined;
 
   constructor(options: ClaudeOptions = {}) {
     this.override = options.command;
+    this.pathOverride = options.pathOverride;
   }
 
   refresh(): void { this.found = undefined; }
@@ -35,23 +32,24 @@ export class ClaudeExecutor implements Executor {
   command(): Command | undefined {
     if (this.override) return this.override;
     if (this.found === undefined) {
-      this.found = claudeBin() ?? null;
+      this.found = claudeBin(this.pathOverride?.()) ?? null;
     }
     return this.found ?? undefined;
   }
 
-  status(): ExecutorStatus {
+  status(catalogModels?: ModelOption[]): ExecutorStatus {
     const cmd = this.command();
-    if (!cmd) return { available: false, models: CLAUDE_MODELS, note: 'claude.exe не найден (Claude Desktop или Claude Code)' };
+    const models = catalogModels ?? claudeModels();
+    if (!cmd) return { available: false, models, note: 'claude.exe не найден (Claude Desktop или Claude Code)' };
     // The CLI bundled with Claude Desktop is signed in only inside Desktop's own sessions.
     if (!signedIn(cmd)) {
       const shown = [cmd.command, ...cmd.args].map((p) => `"${p}"`).join(' ');
-      return { available: false, models: CLAUDE_MODELS, note: `Claude Code не авторизован для фоновых задач. Один раз выполните в терминале: & ${shown} auth login` };
+      return { available: false, models, note: `Claude Code не авторизован для фоновых задач. Один раз выполните в терминале: & ${shown} auth login` };
     }
-    return { available: true, models: CLAUDE_MODELS };
+    return { available: true, models };
   }
 
-  prepare(task: Task, _onAgent: (agentId: string) => void, resume?: string): PreparedRun {
+  prepare(task: Task, _onAgent: (agentId: string) => void, resume?: string, captureLimit = 200_000): PreparedRun {
     // A known session id lets the office link the task to its worker right away. Resuming keeps
     // the same id (Claude makes a new one only with --fork-session), so the same worker continues.
     const session = resume ?? randomUUID();
@@ -63,9 +61,7 @@ export class ClaudeExecutor implements Executor {
       ...(resume ? ['--resume', resume] : ['--session-id', session, '-n', `Доска: ${clip(task.prompt, 40)}`]),
     ];
     if (task.effort) args.push('--effort', task.effort);
-    if (task.systemPrompt) args.push('--system-prompt', task.systemPrompt);
-    if (task.mcpConfigPath) args.push('--mcp-config', task.mcpConfigPath);
-    return { args, agentId: session, output: printOutput() };
+    return { args, agentId: session, output: printOutput(captureLimit) };
   }
 
   sessionOf(agentId: string): string | undefined {
@@ -90,15 +86,17 @@ export class ClaudeExecutor implements Executor {
 }
 
 /** `claude -p` prints the final answer to stdout. */
-function printOutput(): OutputParser {
+function printOutput(captureLimit: number): OutputParser {
+  let last = '';
   return {
-    onStdout() {},
-    last: () => undefined,
+    onStdout(chunk) { last = (last + chunk).slice(-captureLimit); },
+    last: () => stripAnsi(last).trim() || undefined,
     finish(code, stdout, stderr) {
+      stdout = stripAnsi(stdout);
+      stderr = stripAnsi(stderr);
       if (code === 0) return { ok: true, text: stdout.trim() };
-      if (/not logged in|please run \/login/i.test(stdout))
-        return { ok: false, signedOut: true, text: 'Claude Code не авторизован для фоновых задач: выполните вход (подсказка на доске задач)' };
-      return { ok: false, text: (stdout.trim() ? stdout : stderr).trim().slice(-2_000) || `Код выхода ${code}` };
+      return cliFailure('claude auth', stdout, stderr) ??
+        { ok: false, text: (stdout.trim() ? stdout : stderr).trim().slice(-2_000) || `Код выхода ${code}` };
     },
   };
 }
@@ -106,14 +104,14 @@ function printOutput(): OutputParser {
 function signedIn(cmd: Command): boolean {
   try {
     const out = execFileSync(cmd.command, [...cmd.args, 'auth', 'status'], { encoding: 'utf8', windowsHide: true, timeout: 15_000 });
-    return JSON.parse(out).loggedIn === true;
+    return JSON.parse(stripAnsi(out)).loggedIn === true;
   } catch {
     return false;
   }
 }
 
-function claudeBin(): Command | undefined {
-  const candidates: string[] = [];
+function claudeBin(pathOverride?: string): Command | undefined {
+  const candidates: string[] = pathOverride ? [pathOverride] : [];
   if (process.env.LAND_CLAUDE_BIN) candidates.push(process.env.LAND_CLAUDE_BIN);
   const data = join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), 'Claude-Data');
   for (const profile of safeDir(data)) {
@@ -123,12 +121,5 @@ function claudeBin(): Command | undefined {
   }
   const name = process.platform === 'win32' ? 'claude.exe' : 'claude';
   candidates.push(join(homedir(), '.claude', 'local', name), join(homedir(), '.local', 'bin', name));
-  for (const bin of candidates) {
-    const cmd = cliCommand(bin, 'claude', '@anthropic-ai/claude-code');
-    if (cmd && probeCommand(cmd).ok) return cmd;
-  }
-  for (const candidate of locateCli('claude', '@anthropic-ai/claude-code')) {
-    if (probeCommand(candidate.command).ok) return candidate.command;
-  }
-  return undefined;
+  return findCli('claude', '@anthropic-ai/claude-code', candidates);
 }

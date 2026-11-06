@@ -1,55 +1,483 @@
-<!doctype html><html lang="ru"><meta charset="utf-8"><title>Office panel regression checks</title>
-<body><output id="checks">Running…</output><aside id="sidebar"><div class="pane tasks"></div></aside>
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Office 1.5 Panel & Component Regression Checks</title>
+  <link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+  <div class="test-header">
+    <h2>Office 1.5 Test Stand</h2>
+    <output id="checks">Running…</output>
+  </div>
+
+  <div id="test-sandbox">
+    <div id="mcp-slot"></div>
+    <aside id="sidebar"></aside>
+  </div>
+
 <script type="module">
 import { TaskBoardPanel } from '/src/board.ts';
+import { Sidebar } from '/src/ui.ts';
+import { MeetingPanel } from '/src/meeting.ts';
+import { SettingsPanel } from '/src/settings.ts';
+import { McpMenuComponent, renderContextBudgetGauge } from '/src/mcp-menu.ts';
+import { modelSelect } from '/src/ui-kit.ts';
+import { openAgentConstructor, ROLE_TEMPLATES } from '/src/agent-constructor.ts';
+import { store } from '/src/store.ts';
 import { OfficeResidents } from '/src/residents.ts';
 import { SCRIPTS } from '/src/resident-life.ts';
 import { Container } from 'pixi.js';
 import { walkable } from '/src/layout.ts';
-import '/src/style.css';
+
 const checks = [];
-const check = (condition, name) => { if (!condition) throw new Error(name); checks.push(name); };
+const check = (condition, name) => {
+  if (!condition) {
+    console.error('Assertion failed:', name);
+    throw new Error(name);
+  }
+  checks.push(name);
+};
+
 try {
+  // =========================================================
+  // 1. TaskBoardPanel (Conversations, draft, streaming caret)
+  // =========================================================
   const sent = [];
-  const panel = new TaskBoardPanel(document.querySelector('.pane.tasks'), (m) => { sent.push(m); return true; }, () => {});
-  const config = { projects: ['C:/test'], outsideGit: [], executors: Object.fromEntries(['codex','claude','antigravity'].map((e) => [e,{available:true,models:[{id:'test',label:'Test'}]}])) };
-  const root = { id:'root', prompt:'Длинный ответ', result:'Начало\n'+'строка\n'.repeat(1500)+'КОНЕЦ', cwd:'C:/test',executor:'codex', model:'test', access:'read',status:'done',createdAt:1,agentId:'session' };
-  const other = {...root,id:'other',createdAt:2,prompt:'Другой разговор'};
-  panel.setBoard(config,[other,root]);
-  const click = (selector) => document.querySelector(selector).click();
-  const type = (value) => { const a=document.querySelector('.composer textarea'); a.value=value; a.dispatchEvent(new Event('input',{bubbles:true})); return a; };
+  const send = (m) => { sent.push(m); return true; };
+  const sidebarEl = document.querySelector('#sidebar');
+  const sidebar = new Sidebar(sidebarEl, () => {}, send);
+
+  const panel = new TaskBoardPanel(sidebar.tasksPane, send, () => {});
+  const config = {
+    projects: ['C:/test'],
+    outsideGit: [],
+    executors: Object.fromEntries(['codex','claude','antigravity'].map((e) => [e, { available: true, models: [{ id: 'test', label: 'Test' }] }]))
+  };
+  const root = { id: 'root', prompt: 'Длинный ответ', result: 'Начало\n' + 'строка\n'.repeat(1500) + 'КОНЕЦ', cwd: 'C:/test', executor: 'codex', model: 'test', access: 'read', status: 'done', createdAt: 1, agentId: 'session' };
+  const other = { ...root, id: 'other', createdAt: 2, prompt: 'Другой разговор' };
+  panel.setBoard(config, [other, root]);
+
+  const click = (sel) => {
+    const el = document.querySelector(sel);
+    if (!el) throw new Error('Element not found: ' + sel);
+    el.click();
+  };
+  const type = (val) => {
+    const a = document.querySelector('.composer textarea');
+    if (!a) throw new Error('Composer textarea not found');
+    a.value = val;
+    a.dispatchEvent(new Event('input', { bubbles: true }));
+    return a;
+  };
+
   click('[data-act="thread"][data-id="root"]');
-  check(document.querySelector('.messages').textContent.includes('КОНЕЦ'),'long answer has its tail');
-  const area=type('Черновик корня'); area.focus(); area.setSelectionRange(3,7);
-  panel.upsert({...other,result:'Обновление'});
-  check(document.querySelector('.composer textarea')===area && area.value==='Черновик корня' && area.selectionStart===3,'updates preserve composer DOM, text and caret');
-  click('[data-act="thread"][data-id="other"]'); type('Второй черновик');
-  click('[data-act="thread"][data-id="root"]');
-  check(document.querySelector('.composer textarea').value==='Черновик корня','per-conversation draft restored');
-  document.querySelector('.composer textarea').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,bubbles:true}));
-  check(sent.at(-1).type==='task.reply' && sent.at(-1).taskId==='root','Ctrl+Enter replies to selected session');
-  const request=sent.at(-1).requestId;
+  check(document.querySelector('.messages').textContent.includes('КОНЕЦ'), 'long answer has its tail');
+
+  const area = type('Черновик корня');
+  area.focus();
+  area.setSelectionRange(3, 7);
+  panel.upsert({ ...other, result: 'Обновление' });
+  check(document.querySelector('.composer textarea') === area && area.value === 'Черновик корня' && area.selectionStart === 3, 'updates preserve composer DOM, text and caret');
+
   click('[data-act="thread"][data-id="other"]');
-  panel.submissionResult(request,'Проверочный отказ');
+  type('Второй черновик');
   click('[data-act="thread"][data-id="root"]');
-  check(document.querySelector('.composer textarea').value==='Черновик корня' && document.querySelector('.composer').textContent.includes('Проверочный отказ'),'rejection after switching preserves draft and error');
+  check(document.querySelector('.composer textarea').value === 'Черновик корня', 'per-conversation draft restored');
+
+  document.querySelector('.composer textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }));
+  check(sent.at(-1)?.type === 'task.reply' && sent.at(-1)?.taskId === 'root', 'Ctrl+Enter replies to selected session');
+
+  const request = sent.at(-1)?.requestId;
+  click('[data-act="thread"][data-id="other"]');
+  panel.submissionResult(request, 'Проверочный отказ');
+  click('[data-act="thread"][data-id="root"]');
+  check(document.querySelector('.composer textarea').value === 'Черновик корня' && document.querySelector('.composer').textContent.includes('Проверочный отказ'), 'rejection after switching preserves draft and error');
+
   click('[data-act="reply-send"]');
-  const accepted=sent.at(-1).requestId;
-  panel.upsert({...root,id:'reply',continues:'root',prompt:'Черновик корня',createdAt:3,status:'running',result:undefined});
+  const accepted = sent.at(-1)?.requestId;
+  panel.upsert({ ...root, id: 'reply', continues: 'root', prompt: 'Черновик корня', createdAt: 3, status: 'running', result: undefined });
   panel.submissionResult(accepted);
-  panel.upsert({...root,id:'reply',continues:'root',prompt:'Черновик корня',createdAt:3});
-  check(document.querySelectorAll('.conversation-turn').length===2,'continuation stays in one history');
-  check(document.querySelector('.composer textarea').value==='','accepted reply clears draft');
-  type('Продолжить'); click('[data-act="reply-send"]');
-  check(sent.at(-1).taskId==='reply','next reply targets latest turn');
-  const residents=new OfficeResidents(new Container(), () => 0.4);
-  const positions=new Set();
-  for(let i=0;i<1800;i++){residents.update(0.1,[{x:5,y:5}]);for(const r of residents.life.people){check(Number.isFinite(r.x)&&r.x>=0&&r.x<24&&r.y>=0&&r.y<18,'residents stay inside office');check(walkable(Math.round(r.x),Math.round(r.y))&&r.path.every(p=>walkable(p.x,p.y)),'routes avoid office furniture');positions.add(r.id+':'+Math.round(r.x)+','+Math.round(r.y));}}
-  check(positions.size>50,'all three residents keep moving through multiple activities');
-  check(residents.life.people.length===3,'three permanent residents without sessions');
-  const poses=new OfficeResidents(new Container());
-  for(const r of poses.life.people) for(const script of SCRIPTS[r.id]) for(const b of script){ Object.assign(r,{action:b.action,text:b.text,age:1.2,remaining:99,path:[]}); poses.update(0,[]); }
-  check(true,'every resident action renders without an exception');
-  document.querySelector('#checks').textContent='PASS: '+[...new Set(checks)].join('; ');
-} catch(e) { document.querySelector('#checks').textContent='FAIL: '+e.stack; }
-</script></body></html>
+  panel.upsert({ ...root, id: 'reply', continues: 'root', prompt: 'Черновик корня', createdAt: 3 });
+  check(document.querySelectorAll('.conversation-turn').length === 2, 'continuation stays in one history');
+  check(document.querySelector('.composer textarea').value === '', 'accepted reply clears draft');
+
+  type('Продолжить');
+  click('[data-act="reply-send"]');
+  check(sent.at(-1)?.taskId === 'reply', 'next reply targets latest turn');
+
+  // =========================================================
+  // 2. Model Selector (modelSelect: optgroups, custom, efforts, rescan)
+  // =========================================================
+  let rescanFired = false;
+  let selectedModel = 'claude-3-7-sonnet';
+  let selectedExecutor = 'claude';
+  let selectedEffort = 'high';
+
+  const testCatalog = {
+    updatedAt: Date.now(),
+    models: [
+      { id: 'claude-3-7-sonnet', name: 'Claude 3.7 Sonnet', provider: 'claude', description: 'Гибридное мышление', contextTokens: 200000, maxOutputTokens: 64000, efforts: ['low', 'medium', 'high'] },
+      { id: 'gpt-5-codex', name: 'GPT-5 Codex', provider: 'codex', description: 'Инженерная модель', contextTokens: 256000, efforts: ['low', 'high', 'xhigh'] },
+      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'antigravity', description: 'Глубокий анализ', contextTokens: 1000000 }
+    ],
+    aliases: { 'default': 'claude-3-7-sonnet' }
+  };
+  store.setCatalog(testCatalog);
+
+  const modelContainer = document.createElement('div');
+  document.body.appendChild(modelContainer);
+
+  const ctrl = modelSelect({
+    container: modelContainer,
+    catalog: testCatalog,
+    currentModel: selectedModel,
+    currentExecutor: selectedExecutor,
+    currentEffort: selectedEffort,
+    allowRescan: true,
+    onChange: (info) => {
+      selectedModel = info.model;
+      selectedExecutor = info.executor;
+      selectedEffort = info.effort;
+    },
+    onRescan: () => {
+      rescanFired = true;
+    }
+  });
+
+  const optgroups = modelContainer.querySelectorAll('optgroup');
+  check(optgroups.length === 3, 'modelSelect has 3 provider optgroups');
+  const labels = Array.from(optgroups).map(g => g.label);
+  check(labels.includes('Claude Code') && labels.includes('Codex') && labels.includes('Antigravity'), 'optgroup labels match providers');
+
+  const customOption = modelContainer.querySelector('option[value="__custom__"]');
+  check(!!customOption, 'modelSelect has custom model option');
+
+  const customInput = modelContainer.querySelector('.model-custom-input');
+  check(customInput && customInput.hidden, 'custom input hidden initially');
+
+  ctrl.selectEl.value = '__custom__';
+  ctrl.selectEl.dispatchEvent(new Event('change'));
+  check(!customInput.hidden, 'custom input revealed when custom chosen');
+
+  ctrl.setModel('gpt-5-codex');
+  check(selectedExecutor === 'codex', 'selecting model auto-updates executor');
+  check(ctrl.effortSelectEl && !ctrl.effortSelectEl.disabled, 'effort dropdown adapted for gpt-5-codex');
+
+  ctrl.rescanBtn?.click();
+  check(rescanFired, 'model rescan button triggers rescan handler');
+
+  // =========================================================
+  // 3. Employees & Agent Profile Cards (ui.ts)
+  // =========================================================
+  sidebar.showTab('office');
+  check(!sidebarEl.querySelector('.pane.office').hidden, 'office tab opens');
+
+  const sampleAgents = [
+    {
+      id: 'agent-1',
+      name: 'Архитектор Клод',
+      role: 'architect',
+      goal: 'Проектировать масштабируемые системы',
+      backstory: 'Опытный системный инженер с десятилетним стажем в высоконагруженных распределенных системах и микросервисах.',
+      executor: 'claude',
+      model: 'claude-3-7-sonnet',
+      reasoningEffort: 'high',
+      access: 'full',
+      appearance: { outfit: '#d97757', accessory: 'glasses' },
+      mcpServers: ['github', 'filesystem'],
+      advanced: { temperature: 'strict', contextBudget: { maxInputChars: 400000, maxOutputChars: 64000, overflow: 'compact' }, retries: 2, timeoutMs: 900000, allowedPaths: ['src/**'], ignoredPaths: ['node_modules/**'], cliFlags: [] },
+      createdAt: Date.now() - 10000,
+      updatedAt: Date.now()
+    },
+    {
+      id: 'agent-2',
+      name: 'Кодекс Кодер',
+      role: 'coder',
+      goal: 'Писать надежный код без багов',
+      backstory: 'Фанат чистого кода и автоматических тестов.',
+      executor: 'codex',
+      model: 'gpt-5-codex',
+      reasoningEffort: 'xhigh',
+      access: 'read',
+      appearance: { outfit: '#10a37f', accessory: 'cap' },
+      mcpServers: ['git'],
+      advanced: { temperature: 'balanced', contextBudget: { maxInputChars: 250000, maxOutputChars: 32000, overflow: 'trim' }, retries: 1, timeoutMs: 300000, allowedPaths: [], ignoredPaths: [], cliFlags: [] },
+      createdAt: Date.now() - 5000,
+      updatedAt: Date.now()
+    }
+  ];
+
+  store.setAgents(sampleAgents);
+  sidebar.renderAgents(new Map(), new Map());
+
+  const agentCards = sidebarEl.querySelectorAll('.agent-card');
+  check(agentCards.length === 2, '2 employee cards rendered');
+
+  const firstCard = agentCards[0];
+  const avatar = firstCard.querySelector('.agent-avatar.avatar-claude');
+  check(!!avatar, 'avatar has claude provider class');
+
+  const rolePill = firstCard.querySelector('.role-pill');
+  check(rolePill && rolePill.textContent.includes('Архитектор'), 'role pill shows human label');
+
+  const modelBadge = firstCard.querySelector('.model-badge');
+  check(!!modelBadge, 'card contains model badge');
+
+  const mcpBadge = firstCard.querySelector('.agent-mcp-indicator');
+  check(mcpBadge && mcpBadge.textContent.includes('2/'), 'card shows active MCP count');
+
+  const backstoryPreview = firstCard.querySelector('.backstory-preview');
+  check(backstoryPreview && !backstoryPreview.classList.contains('expanded'), 'backstory collapsed by default');
+  firstCard.querySelector('.backstory-toggle')?.click();
+  check(backstoryPreview.classList.contains('expanded'), 'backstory expands on toggle click');
+
+  const assignBtn = firstCard.querySelector('[data-act="assign"]');
+  const teamBtn = firstCard.querySelector('[data-act="join-team"]');
+  const editBtn = firstCard.querySelector('[data-act="edit"]');
+  const dupBtn = firstCard.querySelector('[data-act="duplicate"]');
+  const exportBtn = firstCard.querySelector('[data-act="export"]');
+  check(assignBtn && teamBtn && editBtn && dupBtn && exportBtn, 'all 5 action buttons present on agent card');
+
+  dupBtn.click();
+  check(sent.at(-1)?.type === 'agents.duplicate' && sent.at(-1)?.id === 'agent-1', 'duplicate button dispatches agents.duplicate');
+
+  // =========================================================
+  // 4. Agent Constructor Modal (agent-constructor.ts)
+  // =========================================================
+  openAgentConstructor({
+    catalog: testCatalog,
+    send,
+    onSaved: () => {}
+  });
+
+  const modalOverlay = document.querySelector('.modal-overlay');
+  check(!!modalOverlay, 'agent constructor modal opened');
+
+  const grid = modalOverlay.querySelector('.constructor-grid');
+  check(!!grid, 'constructor has 2-column grid layout');
+
+  const roleChip = modalOverlay.querySelector('.role-chip[data-template="security"]');
+  check(!!roleChip, 'security role chip present');
+  roleChip.click();
+
+  const goalInput = modalOverlay.querySelector('textarea[name="goal"]');
+  check(goalInput && goalInput.value === ROLE_TEMPLATES.security.goal, 'clicking role chip auto-populates goal');
+
+  const colorSwatch = modalOverlay.querySelector('.palette-swatch[data-hex="#4285f4"]');
+  colorSwatch?.click();
+  check(colorSwatch?.classList.contains('on'), 'appearance outfit color swatch selectable');
+
+  const advancedBlock = modalOverlay.querySelector('.advanced-details');
+  check(!!advancedBlock, 'advanced accordion block present');
+  const tempBtn = modalOverlay.querySelector('.btn-seg button[data-value="creative"]');
+  check(!!tempBtn, 'artistic temperature button 0.85 present');
+
+  const closeBtn = modalOverlay.querySelector('.modal-close');
+  closeBtn?.click();
+  check(!document.querySelector('.modal-overlay'), 'modal closes cleanly');
+
+  // =========================================================
+  // 5. Meeting Room (meeting.ts: topologies, presets, steps, TeamRun)
+  // =========================================================
+  sidebar.showTab('team');
+  check(!sidebarEl.querySelector('.pane.team').hidden, 'team tab opens');
+
+  const meeting = new MeetingPanel(sidebar.teamPane, send);
+  meeting.updateCatalog(testCatalog);
+
+  const topCards = sidebarEl.querySelectorAll('.topology-card');
+  check(topCards.length === 4, '4 topology cards rendered');
+
+  const reviewCard = sidebarEl.querySelector('.topology-card[data-topology="review-loop"]');
+  reviewCard?.click();
+  check(reviewCard?.classList.contains('selected'), 'review-loop topology selected');
+
+  const stepCards = sidebarEl.querySelectorAll('.step-card');
+  check(stepCards.length >= 1, 'step builder initialized with default steps');
+
+  const anchorArea = sidebarEl.querySelector('textarea[data-meeting-anchor]');
+  check(!!anchorArea, 'world anchor textarea exists');
+
+  const presets = [
+    {
+      id: 'preset-code-review',
+      name: 'Код-ревью 1.5',
+      description: 'Автор + Ревьюер',
+      topology: 'review-loop',
+      maxIterations: 3,
+      anchor: 'Стандарты TypeScript Strict',
+      steps: [
+        { role: 'coder', agentId: 'agent-2', model: 'gpt-5-codex', kind: 'write', produces: 'code' },
+        { role: 'reviewer', agentId: 'agent-1', model: 'claude-3-7-sonnet', kind: 'review', produces: 'review' }
+      ]
+    }
+  ];
+
+  const sampleTeamRun = {
+    id: 'run-alpha',
+    title: 'Релиз 1.5',
+    topology: 'review-loop',
+    status: 'running',
+    startedAt: Date.now() - 20000,
+    currentStepIndex: 1,
+    currentIteration: 2,
+    maxIterations: 3,
+    steps: [
+      {
+        index: 0,
+        spec: { role: 'coder', model: 'gpt-5-codex', kind: 'write', produces: 'code' },
+        status: 'done',
+        startedAt: Date.now() - 20000,
+        finishedAt: Date.now() - 10000,
+        artifact: { kind: 'code', size: 1024, summary: 'Написан модуль net.ts', verdict: 'APPROVED', content: '// Net module content' }
+      },
+      {
+        index: 1,
+        spec: { role: 'reviewer', model: 'claude-3-7-sonnet', kind: 'review', produces: 'review' },
+        status: 'running',
+        startedAt: Date.now() - 10000
+      }
+    ]
+  };
+
+  meeting.setTeams([sampleTeamRun], presets);
+  const presetSelect = sidebarEl.querySelector('[data-preset-select]');
+  check(!!presetSelect, 'presets dropdown rendered');
+
+  const compatMatrix = sidebarEl.querySelector('.compatibility-matrix');
+  check(!!compatMatrix, 'visual compatibility matrix rendered');
+
+  const runCard = sidebarEl.querySelector('.team-run-card');
+  check(!!runCard, 'team run card rendered');
+
+  const runStepItems = runCard.querySelectorAll('.run-step-item');
+  check(runStepItems.length === 2, 'run stepper renders 2 steps');
+
+  const approvedBadge = runCard.querySelector('.verdict-approved');
+  check(!!approvedBadge && approvedBadge.textContent.includes('APPROVED'), 'artifact verdict APPROVED shown');
+
+  const resumeBtn = runCard.querySelector('[data-act="resume-step"]');
+  check(!!resumeBtn, 'resume step button present');
+
+  const stopBtn = runCard.querySelector('[data-act="stop-team"]');
+  check(!!stopBtn, 'stop team button present');
+  stopBtn?.click();
+  check(sent.at(-1)?.type === 'team.stop' && sent.at(-1)?.id === 'run-alpha', 'stop button sends team.stop');
+
+  // =========================================================
+  // 6. MCP Dropdown Menu & Context Budget Gauge (mcp-menu.ts)
+  // =========================================================
+  const mcpSlot = document.querySelector('#mcp-slot');
+  const mcpMenu = new McpMenuComponent(mcpSlot, send);
+
+  const mcpStatuses = [
+    { id: 'github', name: 'GitHub', state: 'active', version: '1.2.0' },
+    { id: 'jira', name: 'Jira', state: 'missing' },
+    { id: 'postgres', name: 'PostgreSQL', state: 'installing' },
+    { id: 'docker', name: 'Docker', state: 'failed', error: 'daemon not found' }
+  ];
+  store.setMcp(mcpStatuses);
+
+  const dots = mcpSlot.querySelectorAll('.mcp-dot');
+  check(dots.length >= 4, 'MCP status dots present');
+
+  const activeDot = mcpSlot.querySelector('.mcp-dot.active');
+  const missingDot = mcpSlot.querySelector('.mcp-dot.missing');
+  const installingDot = mcpSlot.querySelector('.mcp-dot.installing');
+  const failedDot = mcpSlot.querySelector('.mcp-dot.failed');
+  check(activeDot && missingDot && installingDot && failedDot, 'all 4 MCP statuses mapped correctly');
+
+  const installBtn = mcpSlot.querySelector('[data-install="jira"]');
+  check(!!installBtn, '1-click install button rendered for missing MCP');
+  installBtn?.click();
+  check(sent.at(-1)?.type === 'mcp.install' && sent.at(-1)?.id === 'jira', 'install button dispatches mcp.install');
+
+  const gaugeHtml = renderContextBudgetGauge(300000, 400000);
+  const tempGauge = document.createElement('div');
+  tempGauge.innerHTML = gaugeHtml;
+  const bar = tempGauge.querySelector('.context-bar-fill');
+  check(bar && bar.getAttribute('data-pct') === '75', 'gauge calculates 75% load accurately');
+
+  // =========================================================
+  // 7. Settings Panel (settings.ts: 5 sections, doctor, backup)
+  // =========================================================
+  sidebar.showTab('settings');
+  check(!sidebarEl.querySelector('.pane.settings').hidden, 'settings tab opens');
+
+  const settingsPanel = new SettingsPanel(sidebar.settingsPane, send);
+
+  const sectionTabs = sidebarEl.querySelectorAll('.settings-nav button');
+  check(sectionTabs.length === 5, 'settings has 5 sections');
+
+  settingsPanel.showSection('security');
+
+  const doctorChecks = [
+    { id: 'cli-claude', title: 'Claude CLI', status: 'ok', detail: 'Готов к работе' },
+    { id: 'git-repo', title: 'Git репозиторий', status: 'warn', detail: 'Есть незакоммиченные файлы' },
+    { id: 'mcp-config', title: 'Конфигурация MCP', status: 'fail', detail: 'Не найден mcp-config.json', fix: true }
+  ];
+  store.setDoctorChecks(doctorChecks);
+
+  const docRows = sidebarEl.querySelectorAll('.doctor-list .doctor-item');
+  check(docRows.length === 3, 'doctor checks list rendered 3 checks');
+
+  const fixBtn = sidebarEl.querySelector('[data-doctor-fix="mcp-config"]');
+  check(!!fixBtn, 'automatic fix button present for fixable check');
+  fixBtn?.click();
+  check(sent.at(-1)?.type === 'doctor.fix' && sent.at(-1)?.id === 'mcp-config', 'fix button sends doctor.fix');
+
+  const exportBackupBtn = sidebarEl.querySelector('[data-act="export-backup"]');
+  check(!!exportBackupBtn, 'export backup button present');
+  exportBackupBtn?.click();
+  check(sent.at(-1)?.type === 'backup.export', 'export backup sends backup.export');
+
+  // =========================================================
+  // 8. Residents simulation (residents.ts & layout.ts)
+  // =========================================================
+  const residents = new OfficeResidents(new Container(), () => 0.4);
+  const positions = new Set();
+  for (let i = 0; i < 1800; i++) {
+    residents.update(0.1, [{ x: 5, y: 5 }]);
+    for (const r of residents.life.people) {
+      check(Number.isFinite(r.x) && r.x >= 0 && r.x < 24 && r.y >= 0 && r.y < 18, 'residents stay inside office');
+      check(walkable(Math.round(r.x), Math.round(r.y)) && r.path.every(p => walkable(p.x, p.y)), 'routes avoid office furniture');
+      positions.add(r.id + ':' + Math.round(r.x) + ',' + Math.round(r.y));
+    }
+  }
+  check(positions.size > 50, 'all three residents keep moving through multiple activities');
+  check(residents.life.people.length === 3, 'three permanent residents without sessions');
+
+  const poses = new OfficeResidents(new Container());
+  for (const r of poses.life.people) {
+    for (const script of SCRIPTS[r.id]) {
+      for (const b of script) {
+        Object.assign(r, { action: b.action, text: b.text, age: 1.2, remaining: 99, path: [] });
+        poses.update(0, []);
+      }
+    }
+  }
+  check(true, 'every resident action renders without an exception');
+
+  // =========================================================
+  // 9. Light & Dark Themes and Zero Horizontal Overflow
+  // =========================================================
+  const panes = ['office', 'tasks', 'team', 'dns', 'settings', 'updates'];
+  for (const t of ['dark', 'light']) {
+    document.documentElement.setAttribute('data-theme', t);
+    for (const p of panes) {
+      sidebar.showTab(p);
+      const activePane = sidebarEl.querySelector(`.pane.${p}`);
+      if (activePane) {
+        check(activePane.scrollWidth <= activePane.clientWidth + 1, `pane ${p} has no horizontal scroll in ${t} theme`);
+      }
+    }
+  }
+
+  document.querySelector('#checks').textContent = 'PASS: ' + [...new Set(checks)].join('; ');
+} catch (e) {
+  document.querySelector('#checks').textContent = 'FAIL: ' + e.stack;
+}
+</script>
+</body>
+</html>

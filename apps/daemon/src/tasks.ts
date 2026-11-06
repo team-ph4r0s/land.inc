@@ -1,20 +1,20 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Access, BoardConfig, Executor as ExecutorId, NewTask, Task } from '@land/protocol';
+import { DEFAULT_SETTINGS, isCustomModelId, type Access, type BoardConfig, type Executor as ExecutorId, type LandSettings, type NewTask, type Task } from '@land/protocol';
 import type { Store } from './store.ts';
 import type { Executor, OutputParser } from './executors/types.ts';
 import { ClaudeExecutor } from './executors/claude.ts';
 import { CodexExecutor } from './executors/codex.ts';
 import { AntigravityExecutor } from './executors/antigravity.ts';
-import { sanitizeWorkspacePath } from './security/shield.ts';
-import { HangDetector } from './supervisor.ts';
-import { McpManager } from './executors/mcp-manager.ts';
-import { redactSecrets } from './security/shield.ts';
-import { preIteration, postIteration } from './pipeline/hooks.ts';
+import { sanitizeWorkspacePath } from './workspace-path.ts';
+import { HangDetector, killTree, ProcessSupervisor } from './process-supervisor.ts';
+import { readJson, record, writeJson } from './json-store.ts';
+import { applyMcpPipeline, maskSecrets, type McpPipelineOptions } from './mcp.ts';
+import type { ModelCatalogService } from './model-catalog.ts';
 
 const MAX_RUNNING = 4;
 const MAX_PROMPT = 100_000;
@@ -27,6 +27,10 @@ export interface BoardOptions {
   executors?: Executor[];
   /** Where the task history lives; null keeps it in memory only. */
   file?: string | null;
+  catalog?: ModelCatalogService;
+  settings?: () => LandSettings;
+  supervisor?: ProcessSupervisor;
+  convertAttachment?: McpPipelineOptions['convert'];
 }
 
 /**
@@ -39,7 +43,6 @@ export interface StreamChunk { taskId: string; chunk: string; sequence: number; 
 export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk] }> {
   private tasks: Task[] = [];
   private procs = new Map<string, ChildProcess>();
-  private outputs = new Map<string, OutputParser>();
   private executors: Map<ExecutorId, Executor>;
   private file: string | null;
   private cached?: { at: number; config: BoardConfig };
@@ -55,8 +58,12 @@ export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk
   /** Swappable in tests. */
   private killTree = killTree;
   private store: Store;
+  private catalog?: ModelCatalogService;
+  private settings?: () => LandSettings;
+  private supervisor: ProcessSupervisor;
+  private convertAttachment?: McpPipelineOptions['convert'];
   private readonly hangs = new HangDetector();
-  private readonly mcp = new McpManager();
+  /** Live output for the office, throttled to one message per task every 60 ms. */
   private readonly streamBuffers = new Map<string, string>();
   private readonly streamTimers = new Map<string, NodeJS.Timeout>();
   private readonly streamSequences = new Map<string, number>();
@@ -64,6 +71,10 @@ export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk
   constructor(store: Store, options: BoardOptions = {}) {
     super();
     this.store = store;
+    this.catalog = options.catalog;
+    this.settings = options.settings;
+    this.supervisor = options.supervisor ?? new ProcessSupervisor();
+    this.convertAttachment = options.convertAttachment;
     const executors = options.executors ?? [new ClaudeExecutor(), new CodexExecutor(), new AntigravityExecutor()];
     this.executors = new Map(executors.map((e) => [e.id, e]));
     this.file = options.file === undefined ? join(homedir(), '.land', 'tasks.json') : options.file;
@@ -75,13 +86,11 @@ export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk
       const task = this.tasks.find((t) => t.agentId === m.agent.id);
       if (task && m.agent.taskId !== task.id) store.update(m.agent.id, { source: m.agent.source, taskId: task.id });
     });
-    process.on('exit', () => {
-      for (const p of this.procs.values()) killTree(p, true);
-    });
+    // A CLI that prints nothing for long may wait for a permission nobody can give: say so, do not kill it.
     setInterval(() => {
       for (const record of this.hangs.check()) {
         const task = this.tasks.find((item) => item.id === record.taskId);
-        if (task && (task.status === 'starting' || task.status === 'running')) this.annotate(task.id, `Процесс не отвечает более ${Math.round((Date.now() - record.lastActivity) / 1000)} с. Можно мягко перезапустить этот этап или остановить дерево процессов.`);
+        if (task && (task.status === 'starting' || task.status === 'running')) this.annotate(task.id, `CLI ничего не выводит уже ${Math.round((Date.now() - record.lastActivity) / 1000)} с: возможно, он ждёт подтверждения или завис. Задачу можно остановить.`);
       }
     }, 5_000).unref();
   }
@@ -105,9 +114,12 @@ export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk
   annotate(id: string, note: string): void {
     const task = this.tasks.find((t) => t.id === id);
     if (!task) return;
-    task.result = task.result ? `${task.result}\n\n${note}` : note;
+    const safe = this.redact(note);
+    task.result = task.result ? `${task.result}\n\n${safe}` : safe;
     this.changed(task);
   }
+
+  invalidateConfig(): void { this.cached = undefined; }
 
   config(refresh = false): BoardConfig {
     if (refresh) {
@@ -116,8 +128,13 @@ export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk
     }
     if (this.cached && Date.now() - this.cached.at < CONFIG_TTL_MS) return this.cached.config;
     const projects = this.projects();
+    const catalog = this.catalog?.get();
     const executors = Object.fromEntries(
-      EXECUTORS.map((id) => [id, this.executors.get(id)?.status() ?? { available: false, models: [], note: 'Исполнитель не подключён' }]),
+      EXECUTORS.map((id) => {
+        const models = catalog?.models.filter((model) => model.executor === id);
+        const status = this.executors.get(id)?.status(models) ?? { available: false, models: [], note: 'Исполнитель не подключён' };
+        return [id, { ...status, models: models ?? status.models }];
+      }),
     ) as BoardConfig['executors'];
     const config: BoardConfig = { projects, outsideGit: projects.filter((p) => !inGit(p)), executors };
     this.cached = { at: Date.now(), config };
@@ -144,14 +161,14 @@ export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk
       throw new Error('Этот агент уже отвечает на другое сообщение');
     return this.create(
       // Model and effort stay as they were unless the reply picks others.
-      { prompt: input.prompt, cwd: previous.cwd, executor: previous.executor, model: input.model || previous.model, effort: input.effort || (input.model ? undefined : previous.effort), access: input.access, conversationId: previous.conversationId, systemPrompt: previous.systemPrompt, mcpConfigPath: previous.mcpConfigPath },
+      { prompt: input.prompt, cwd: previous.cwd, executor: previous.executor, model: input.model || previous.model, effort: input.effort || (input.model ? undefined : previous.effort), access: input.access },
       { resume: session, continues: previous.id, agentId: previous.agentId },
     );
   }
 
   /** Validate and start a task. Throws an Error with a message for the user. */
-  create(input: NewTask, from?: { resume: string; continues: string; agentId?: string }): Task {
-    const prompt = typeof input.prompt === 'string' ? preIteration(input.prompt.trim()).prompt : '';
+  create(input: NewTask & Pick<McpPipelineOptions, 'attachments' | 'history'>, from?: { resume: string; continues: string; agentId?: string }): Task {
+    const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
     if (!prompt) throw new Error('Опишите задачу');
     if (prompt.length > MAX_PROMPT) throw new Error(`Задача длиннее ${MAX_PROMPT} символов`);
     // Check before resolve(): an empty or relative path would quietly become the daemon's own folder.
@@ -163,21 +180,27 @@ export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk
     if (input.access !== 'read' && input.access !== 'write') throw new Error('Неизвестный режим доступа');
     const executor = this.config().executors[input.executor];
     if (!executor.available) throw new Error(executor.note ?? 'Исполнитель недоступен');
-    // Only listed models and efforts reach the command line.
-    const model = executor.models.find((m) => m.id === input.model);
-    if (!model) throw new Error('Модель недоступна');
-    if (input.effort && !model.efforts?.includes(input.effort)) throw new Error('Такой уровень рассуждений модель не поддерживает');
+    // Listed models with their own efforts; a custom id (local proxy) only as a plain identifier with a standard effort.
+    const listed = executor.models.find((m) => m.id === input.model);
+    if (!listed && !isCustomModelId(input.model)) throw new Error('Модель недоступна');
+    const efforts = listed ? listed.efforts ?? [] : ['low', 'medium', 'high', 'xhigh'];
+    if (input.effort && !efforts.includes(input.effort)) throw new Error('Такой уровень рассуждений модель не поддерживает');
+    const model = { id: listed?.id ?? input.model };
     // A task being cancelled still holds its slot until its processes are gone.
     const live = this.tasks.filter((t) => t.status === 'starting' || t.status === 'running' || t.status === 'cancelling');
-    if (live.length >= MAX_RUNNING) throw new Error(`Одновременно выполняется не больше ${MAX_RUNNING} задач`);
+    const settings = this.settings?.() ?? DEFAULT_SETTINGS;
+    const limit = this.settings ? settings.teams.maxConcurrentTasks : MAX_RUNNING;
+    if (live.length >= limit) throw new Error(`Одновременно выполняется не больше ${limit} задач`);
     // One writer per folder: two agents editing the same files would trample each other's work.
     if (input.access === 'write' && live.some((t) => t.access === 'write' && overlaps(t.cwd, cwd)))
       throw new Error('В этой папке уже работает задача с правом записи. Дождитесь её завершения или выберите «Только чтение».');
 
-    const conversationId = input.conversationId ?? randomUUID();
+    const pipeline = applyMcpPipeline(prompt, { cwd, settings, history: input.history, attachments: input.attachments, convert: this.convertAttachment });
+    // A reply stays in its conversation; a new task always starts a new one.
+    const conversationId = from ? this.tasks.find((t) => t.id === from.continues)?.conversationId ?? from.continues : randomUUID();
     const task: Task = {
       id: randomUUID(),
-      prompt,
+      prompt: settings.security.shieldEnabled && settings.mcp.enabled['agentic-shield'] ? maskSecrets(prompt) : prompt,
       cwd,
       executor: input.executor,
       model: model.id,
@@ -187,8 +210,6 @@ export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk
       status: 'starting',
       createdAt: Date.now(),
       conversationId,
-      mcpConfigPath: input.mcpConfigPath ?? this.mcp.writeSessionConfig(conversationId),
-      systemPrompt: input.systemPrompt,
       ...(from ? { continues: from.continues, agentId: from.agentId } : {}),
     };
     if (from) this.resumes.set(task.id, from.resume);
@@ -202,7 +223,7 @@ export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk
       if (present) this.store.update(present.id, { source: present.source, taskId: task.id });
     }
     if (!this.config().projects.includes(cwd)) this.cached = undefined;
-    this.run(task);
+    this.run(task, pipeline.prompt, settings.teams.captureLimitChars);
     return task;
   }
 
@@ -242,7 +263,7 @@ export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk
     } else this.finish(task, 'cancelled', c.last);
   }
 
-  private run(task: Task): void {
+  private run(task: Task, prompt: string, capture: number): void {
     const executor = this.executors.get(task.executor)!;
     let child: ChildProcess;
     let output: OutputParser;
@@ -253,13 +274,14 @@ export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk
       if (!cmd) throw new Error('CLI не найден');
       command = [cmd.command, ...cmd.args].join(' ');
       const prepared = executor.prepare(
-        task,
+        task.prompt === prompt ? task : { ...task, prompt },
         (agentId) => {
           if (task.agentId === agentId) return;
           task.agentId = agentId;
           this.changed(task);
         },
         this.resumes.get(task.id),
+        capture + 512,
       );
       if (prepared.agentId) task.agentId = prepared.agentId;
       output = prepared.output;
@@ -267,6 +289,7 @@ export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk
       child = spawn(cmd.command, [...cmd.args, ...prepared.args], {
         cwd: task.cwd,
         windowsHide: true,
+        shell: false,
         detached: process.platform !== 'win32', // its own process group, so a cancel can stop the whole tree
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -274,40 +297,44 @@ export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk
       return this.finish(task, 'failed', launchError(e as NodeJS.ErrnoException, command));
     }
     this.procs.set(task.id, child);
+    this.supervisor.register(child);
     this.hangs.start(task.id, child);
-    this.outputs.set(task.id, output);
     let stdout = '';
     let stderr = '';
     child.stdout?.setEncoding('utf8').on('data', (d: string) => {
       this.hangs.touch(task.id);
-      stdout = (stdout + d).slice(-200_000);
+      stdout = (stdout + d).slice(-(capture + 512));
       this.queueStream(task.id, d);
       output.onStdout(d);
     });
     child.stderr?.setEncoding('utf8').on('data', (d: string) => { this.hangs.touch(task.id); stderr = (stderr + d).slice(-8_000); this.queueStream(task.id, d); });
     child.on('spawn', () => {
-      task.status = 'running';
-      this.changed(task);
+      if (task.status === 'starting') {
+        task.status = 'running';
+        this.changed(task);
+      }
     });
     child.on('error', (e) => this.finish(task, 'failed', launchError(e, command)));
     child.on('close', (code) => {
       this.procs.delete(task.id);
       this.hangs.stop(task.id);
       this.flushStream(task.id);
+      this.streamSequences.delete(task.id);
       const result = output.finish(code, stdout, stderr);
       const cancel = this.cancels.get(task.id);
       if (task.status === 'cancelling' && cancel) {
         cancel.closed = true;
-        cancel.last = output.last();
+        cancel.last = output.last() ?? (result.ok ? result.text : undefined);
         return this.settleCancel(task);
       }
+      this.cancels.delete(task.id);
       if (result.signedOut) this.cached = undefined;
       if (result.ok) this.finish(task, 'done', result.text || 'Готово');
       else this.finish(task, 'failed', result.text);
     });
     // A CLI that dies before reading its prompt closes stdin; that surfaces through 'close', not as a crash here.
     child.stdin?.on('error', () => {});
-    child.stdin?.end(stdin ?? task.prompt);
+    child.stdin?.end(stdin ?? prompt);
   }
 
   private finish(task: Task, status: Task['status'], result?: string): void {
@@ -316,19 +343,19 @@ export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk
     task.finishedAt = Date.now();
     // Keep the answer in the persisted task too: the UI and a restarted daemon
     // must see the same text as the session continuation (bounded CLI capture).
-    const safeResult = result ? postIteration(result).text : result;
-    task.result = safeResult;
-    if (safeResult) {
-      this.full.set(task.id, safeResult.slice(-200_000));
+    const settings = this.settings?.() ?? DEFAULT_SETTINGS;
+    if (result) result = this.redact(result).slice(-settings.teams.captureLimitChars);
+    task.result = result;
+    if (result) {
+      this.full.set(task.id, result.slice(-settings.teams.captureLimitChars));
       if (this.full.size > 20) this.full.delete(this.full.keys().next().value!);
     }
-    this.outputs.delete(task.id);
     this.resumes.delete(task.id);
     this.changed(task);
   }
 
   private queueStream(taskId: string, chunk: string): void {
-    const current = `${this.streamBuffers.get(taskId) ?? ''}${redactSecrets(chunk)}`.slice(-64_000);
+    const current = `${this.streamBuffers.get(taskId) ?? ''}${this.redact(chunk)}`.slice(-64_000);
     this.streamBuffers.set(taskId, current);
     if (this.streamTimers.has(taskId)) return;
     this.streamTimers.set(taskId, setTimeout(() => this.flushStream(taskId), 60));
@@ -346,6 +373,11 @@ export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk
     this.emit('stream', { taskId, chunk, sequence });
   }
 
+  private redact(value: string): string {
+    const settings = this.settings?.() ?? DEFAULT_SETTINGS;
+    return settings.security.shieldEnabled && settings.mcp.enabled['agentic-shield'] ? maskSecrets(value) : value;
+  }
+
   private changed(task: Task): void {
     this.save();
     this.emit('task', { ...task });
@@ -354,10 +386,12 @@ export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk
   private load(): void {
     if (!this.file) return;
     try {
-      const saved = JSON.parse(readRecoverable(this.file) ?? 'null');
-      if (!Array.isArray(saved)) return;
+      const saved = readJson(this.file, validTasks);
+      if (!saved) return;
       this.tasks = saved.slice(0, KEEP_TASKS);
       for (const t of this.tasks) {
+        t.prompt = this.redact(t.prompt);
+        if (t.result) t.result = this.redact(t.result);
         if (t.status === 'starting' || t.status === 'running' || t.status === 'cancelling') {
           t.status = 'failed';
           t.finishedAt = Date.now();
@@ -372,8 +406,7 @@ export class TaskBoard extends EventEmitter<{ task: [Task]; stream: [StreamChunk
   private save(): void {
     if (!this.file) return;
     try {
-      mkdirSync(dirname(this.file), { recursive: true });
-      writeAtomic(this.file, JSON.stringify(this.tasks, null, 2));
+      writeJson(this.file, this.tasks, validTasks);
     } catch (e) {
       console.log(`[board] не удалось сохранить задачи: ${(e as Error).message}`);
     }
@@ -406,36 +439,15 @@ function launchError(error: NodeJS.ErrnoException, command?: string): string {
   return message;
 }
 
-/** Stop a process and everything it started. `onResult` is called once: no argument on success, the reason otherwise. */
-function killTree(p: ChildProcess, sync = false, onResult?: (error?: string) => void): void {
-  if (!p.pid) return onResult?.();
-  if (process.platform === 'win32') {
-    const args = ['/pid', String(p.pid), '/T', '/F'];
-    if (sync) {
-      if (spawnSync('taskkill', args, { windowsHide: true }).status !== 0) p.kill();
-      return;
-    }
-    // No fallback to killing just the CLI: that would orphan its children and look like a clean cancel.
-    let output = '';
-    const tk = spawn('taskkill', args, { windowsHide: true });
-    tk.stdout?.on('data', (d) => (output += d));
-    tk.stderr?.on('data', (d) => (output += d));
-    tk.on('error', (e) => onResult?.(e.message));
-    tk.on('exit', (code) => {
-      // Only exit code 0 confirms the tree is gone. A dead CLI proves nothing about its
-      // children: once it has exited, taskkill /T can no longer find them by parent.
-      if (code === 0) onResult?.();
-      else onResult?.(output.trim() || `taskkill завершился с кодом ${code}`);
-    });
-  } else {
-    try {
-      process.kill(-p.pid, 'SIGTERM'); // detached: the child leads its own process group
-      onResult?.();
-    } catch (e) {
-      if (sync) p.kill();
-      else onResult?.((e as Error).message);
-    }
-  }
+function validTasks(value: unknown): value is Task[] {
+  return Array.isArray(value) && value.every((item) => {
+    const task = record(item);
+    return !!task && typeof task.id === 'string' && typeof task.cwd === 'string' && typeof task.prompt === 'string' &&
+      typeof task.model === 'string' && typeof task.executor === 'string' && EXECUTORS.some((id) => id === task.executor) &&
+      (task.access === 'read' || task.access === 'write') && Number.isFinite(task.createdAt) &&
+      typeof task.status === 'string' && ['starting', 'running', 'cancelling', 'done', 'failed', 'cancelled'].includes(task.status) &&
+      ['result', 'agentId', 'effort', 'continues'].every((key) => task[key] === undefined || typeof task[key] === 'string');
+  });
 }
 
 /**
