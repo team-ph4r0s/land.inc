@@ -2,12 +2,20 @@ import { readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ModelOption, Task } from '@land/protocol';
-import { findCli, headCwd, mtime } from './files.ts';
+import { findCli, headCwd, mtime, safeDir } from './files.ts';
 import { codexModels } from '../model-catalog.ts';
 import { cliFailure, stripAnsi } from '../ansi.ts';
 import type { Command, Executor, ExecutorStatus, OutputParser, PreparedRun } from './types.ts';
 
 import { record } from '../json-store.ts';
+
+/** Codex Desktop keeps its CLI in %LOCALAPPDATA%\OpenAI\Codex\bin\<build>\codex.exe, newest build first. */
+export function codexDesktopBins(): string[] {
+  if (process.platform !== 'win32') return [];
+  const root = join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), 'OpenAI', 'Codex', 'bin');
+  return safeDir(root).map((build) => join(root, build, 'codex.exe'))
+    .map((file) => ({ file, at: mtime(file) })).filter((c) => c.at > 0).sort((a, b) => b.at - a.at).map((c) => c.file);
+}
 
 export interface CodexOptions {
   /** Override the CLI, e.g. a fake one in tests. */
@@ -37,7 +45,7 @@ export class CodexExecutor implements Executor {
     if (this.override) return this.override;
     if (this.found === undefined) {
       const path = this.pathOverride?.();
-      const candidates = path ? [path] : [process.env.LAND_CODEX_BIN].filter((value): value is string => !!value);
+      const candidates = path ? [path] : [process.env.LAND_CODEX_BIN, ...codexDesktopBins()].filter((value): value is string => !!value);
       this.found = findCli('codex', '@openai/codex', candidates) ?? null;
     }
     return this.found ?? undefined;

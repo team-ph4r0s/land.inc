@@ -210,6 +210,9 @@ send = connect(
       case 'doctor':
         store.setDoctorChecks(m.checks);
         return;
+      case 'providers.scan':
+        store.setProviderScan(m);
+        return;
       case 'backup':
         settingsPanel.handleBackupResult(m.requestId, m.backup, m.error);
         return;
@@ -267,6 +270,7 @@ send = connect(
         board.streamChunk(m.taskId, m.chunk);
         return;
       case 'error':
+        if (store.scanning) { store.scanning = false; store.emit('providers.scan'); }
         board.showError(m.message);
         return;
       case 'folders':

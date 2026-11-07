@@ -31,6 +31,7 @@ export class SettingsPanel {
 
     store.on('settings', () => this.render());
     store.on('doctor', () => this.render());
+    store.on('providers.scan', () => this.render());
     store.on('mcp', () => this.render());
   }
 
@@ -187,6 +188,10 @@ export class SettingsPanel {
       case 'providers':
         return `
           <div class="settings-section">
+            <div class="settings-row">
+              <div class="note">Ищет claude, codex и agy на диске и сам подставляет рабочий путь, если агент не запускается</div>
+              <button type="button" class="btn small primary" data-act="providers-scan" ${store.scanning ? 'disabled' : ''}>${store.scanning ? 'Сканирую…' : 'Сканер'}</button>
+            </div>
             <div class="note">Состояние CLI-провайдеров и переопределение путей к исполняемым файлам</div>
             ${(['claude', 'codex', 'antigravity'] as Executor[])
               .map((ex) => {
@@ -210,6 +215,22 @@ export class SettingsPanel {
                       <span>Кастомный путь к бинарнику (pathOverride):</span>
                       <input type="text" data-provider-override="${esc(ex)}" value="${esc(override)}" placeholder="Оставьте пустым для автопоиска в PATH" />
                     </label>
+                    ${store.providerScan ? `
+                      <div class="doctor-list provider-scan-list">
+                        ${store.providerScan.applied.includes(ex) ? '<div class="note">Путь подставлен автоматически</div>' : ''}
+                        ${store.providerScan.candidates.filter((candidate) => candidate.executor === ex)
+                          .map((candidate) => `
+                            <div class="doctor-item">
+                              <code class="provider-scan-path">${esc(candidate.path)}</code>
+                              <div class="doctor-head">
+                                <span class="note">${esc(candidate.source)}${candidate.version ? ` · ${esc(candidate.version)}` : ''}</span>
+                                <span class="badge ${candidate.works ? 'doctor-status-ok' : 'doctor-status-fail'}">${candidate.works ? 'Работает' : 'Не запускается'}</span>
+                              </div>
+                              ${candidate.works && candidate.path !== override ? `<button type="button" class="btn small" data-scan-use="${esc(ex)}" data-path="${esc(candidate.path)}">Использовать</button>` : ''}
+                            </div>
+                          `).join('') || '<div class="note">Не найдено</div>'}
+                      </div>
+                    ` : ''}
                   </div>
                 `;
               })
@@ -396,6 +417,25 @@ export class SettingsPanel {
         const val = input.value.trim() || undefined;
         this.update({ providers: { [ex]: { pathOverride: val } } });
         showToast(`Путь для ${ex} обновлен`, 'ok');
+      });
+    });
+
+    this.el.querySelector('[data-act="providers-scan"]')?.addEventListener('click', () => {
+      if (store.scanning) return;
+      store.scanning = true;
+      store.emit('providers.scan');
+      if (!this.send({ type: 'providers.scan', apply: true })) {
+        store.scanning = false;
+        store.emit('providers.scan');
+        showToast('Нет соединения с демоном. Повторите сканирование после подключения.', 'bad');
+      }
+    });
+
+    this.el.querySelectorAll<HTMLButtonElement>('[data-scan-use]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const ex = btn.dataset.scanUse as Executor;
+        const path = btn.dataset.path!;
+        this.update({ providers: { [ex]: { pathOverride: path } } });
       });
     });
 

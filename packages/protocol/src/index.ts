@@ -517,6 +517,18 @@ export interface ProviderInfo {
   note?: string;
 }
 
+/** An agent CLI the «Сканер» found on disk. */
+export interface ScanCandidate {
+  executor: Executor;
+  /** Absolute path suitable for `providers.<executor>.pathOverride`. */
+  path: string;
+  /** Where it was found: PATH, npm, Claude Desktop, Codex Desktop, … */
+  source: string;
+  /** `--version` succeeded. */
+  works: boolean;
+  version?: string;
+}
+
 export interface DoctorCheck {
   id: string;
   title: string;
@@ -554,6 +566,8 @@ export type ServerMessage15 =
   | { type: 'team:updated'; run: TeamRun }
   | { type: 'conversations.meta'; meta: ConversationMeta[] }
   | { type: 'doctor'; checks: DoctorCheck[]; at: number }
+  /** Result of «Сканер»: every candidate, and the providers whose path was set automatically. */
+  | { type: 'providers.scan'; candidates: ScanCandidate[]; applied: Executor[]; at: number }
   | { type: 'backup'; requestId: string; backup?: BackupFile; error?: string }
   | { type: 'ack'; requestId: string; ok: boolean; message?: string };
 
@@ -572,6 +586,8 @@ export type ClientMessage15 =
   | { type: 'conversation.meta'; meta: ConversationMeta }
   | { type: 'doctor.run' }
   | { type: 'doctor.fix'; id: string }
+  /** Search the disk for agent CLIs; with `apply`, set pathOverride for providers that do not work now. */
+  | { type: 'providers.scan'; apply?: boolean }
   | { type: 'backup.export'; requestId: string }
   | { type: 'backup.import'; requestId: string; backup: BackupFile }
   | { type: 'token.rotate'; requestId?: string }

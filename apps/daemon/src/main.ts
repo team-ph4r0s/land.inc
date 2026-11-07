@@ -3,7 +3,8 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { DAEMON_PORT, type ClientMessage, type ServerMessage } from '@land/protocol';
+import { DAEMON_PORT, type ClientMessage, type Executor, type ScanCandidate, type ServerMessage } from '@land/protocol';
+import { pickOverrides, scanAgents } from './scanner.ts';
 import { Store } from './store.ts';
 import { ClaudeAdapter } from './adapters/claude.ts';
 import { AntigravityAdapter } from './adapters/antigravity.ts';
@@ -216,6 +217,8 @@ const broadcast = (msg: ServerMessage) => {
   for (const ws of clients) if (ws.readyState === ws.OPEN) ws.send(data);
 };
 
+let scanning: Promise<ScanCandidate[]> | undefined;
+
 const settingsMessage = (refresh = false): ServerMessage => ({
   type: 'settings', settings: getSettings(), providers: doctor.providers(refresh), mcp: mcp.status(),
 });
@@ -284,6 +287,19 @@ wss.on('connection', (ws) => {
           broadcast(settingsMessage(true));
         }
         send(ws, { type: 'doctor', checks: await doctor.run(), at: Date.now() });
+      } else if (msg.type === 'providers.scan') {
+        // Clicks during a scan share it instead of starting more probes.
+        const candidates = await (scanning ??= scanAgents().finally(() => { scanning = undefined; }));
+        // The cached state, refreshed on every path change: no synchronous probes in the handler.
+        const broken = doctor.providers().filter((p) => !p.available).map((p) => p.executor);
+        const picked = msg.apply ? pickOverrides(candidates, broken) : {};
+        const applied = Object.keys(picked) as Executor[];
+        if (applied.length) {
+          settings.update({ providers: Object.fromEntries(applied.map((id) => [id, { pathOverride: picked[id] }])) });
+          await refreshModels(true);
+          broadcast(settingsMessage(true));
+        }
+        send(ws, { type: 'providers.scan', candidates, applied, at: Date.now() });
       } else if (msg.type === 'backup.export') {
         if (!reqId) throw new Error('Не указан идентификатор запроса');
         const teams = teamsMessage();

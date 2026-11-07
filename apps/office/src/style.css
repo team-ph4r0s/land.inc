@@ -609,6 +609,8 @@ button.link { background: none; border: 0; padding: 0; margin-top: 3px; color: v
 .doctor-status-ok { color: var(--ok); font-weight: 700; }
 .doctor-status-warn { color: var(--warn); font-weight: 700; }
 .doctor-status-fail { color: var(--bad); font-weight: 700; }
+.provider-scan-list { margin-top: 6px; }
+.provider-scan-path { overflow-wrap: anywhere; }
 
 /* MCP Dropdown Menu */
 .mcp-dropdown-wrap { position: relative; display: inline-block; }

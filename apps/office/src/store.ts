@@ -9,6 +9,7 @@ import {
   type McpStatus,
   type ModelCatalog,
   type ProviderInfo,
+  type ServerMessage,
   type TeamRun,
   type WorkflowPreset,
 } from '@land/protocol';
@@ -20,7 +21,8 @@ export type StoreEvent =
   | 'mcp'
   | 'teams'
   | 'conversations'
-  | 'doctor';
+  | 'doctor'
+  | 'providers.scan';
 
 class AppStore {
   /** The daemon is the only source of models, presets, providers and MCP state: until it answers, lists are empty. */
@@ -58,6 +60,8 @@ class AppStore {
   }
   conversationsMeta: ConversationMeta[] = [];
   doctorChecks: DoctorCheck[] = [];
+  providerScan?: Omit<Extract<ServerMessage, { type: 'providers.scan' }>, 'type'>;
+  scanning = false;
 
   private listeners: Map<StoreEvent, Set<() => void>> = new Map();
 
@@ -126,6 +130,12 @@ class AppStore {
   setDoctorChecks(checks: DoctorCheck[]): void {
     this.doctorChecks = checks;
     this.emit('doctor');
+  }
+
+  setProviderScan({ candidates, applied, at }: Extract<ServerMessage, { type: 'providers.scan' }>): void {
+    this.providerScan = { candidates, applied, at };
+    this.scanning = false;
+    this.emit('providers.scan');
   }
 
   /** Helper to get models for an executor */
